@@ -64,14 +64,35 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 ## Install
 
 The plugin is a standard DSH profile bundle. It currently targets DSH
-`0.1.0-rc.6`. Clone this repository, install its dependencies, build it, then
-add the local checkout to a dedicated DSH profile:
+`0.1.0-rc.6`.
+
+### Install from npm (recommended)
+
+Create a dedicated profile, install the published package from npm, then boot
+that profile. These commands invoke the real DSH CLI directly and do not rely
+on a shell alias or function:
+
+```bash
+# 1. create the profile and install dsh-chatgpt-bridge from npm
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.1.0
+
+# 2. boot the profile
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
+```
+
+The published npm package is available at
+[`dsh-chatgpt-bridge`](https://www.npmjs.com/package/dsh-chatgpt-bridge).
+
+### Install from source
+
+To develop or inspect the bridge locally, clone this repository, install its
+dependencies, build it, then add the checkout to a dedicated DSH profile:
 
 ```bash
 # 1. clone, install and build
 git clone https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git
 cd dsh-chatgpt-bridge
-npm install
+npm ci
 npm run build
 
 # 2. create the profile and add this checkout (pnpm required; `file:` spec)
@@ -81,10 +102,11 @@ pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add "file:$
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
 ```
 
-`dsh plugin` installs the package into the profile and, because the package
-declares `dsh.bundle.patch`, appends it to the profile's bundle list. The
-bundle patch adds the rows the bridge needs (storage, workspace registry,
-projection cache) plus the `chatgpt-bridge` row itself.
+For either installation method, `dsh plugin` installs the package into the
+profile and, because the package declares `dsh.bundle.patch`, appends it to the
+profile's bundle list. The bundle patch adds the rows the bridge needs
+(storage, workspace registry, projection cache) plus the `chatgpt-bridge` row
+itself.
 
 If pnpm cannot run in your environment (e.g. symlinks blocked), install
 manually: create `$DSH_HOME/profiles/chatgpt-bridge/` with `package.json`
