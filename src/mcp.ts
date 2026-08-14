@@ -1,5 +1,5 @@
 /**
- * MCP server surface: the eleven dsh_* tools ChatGPT calls. Every tool maps
+ * MCP server surface: the fourteen dsh_* tools ChatGPT calls. Every tool maps
  * onto a Bridge operation; nothing here reaches the filesystem, the shell,
  * or DSH internals directly. Outputs are JSON text blocks; failures are
  * reported as isError results with { error: { code, message } }.
@@ -130,8 +130,8 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       title: 'Send a message to a DSH session',
       description:
         'Continue an EXISTING DSH session: the message joins that session\'s durable log and the ' +
-        'same agent loop (never a fresh agent). Returns immediately; poll ' +
-        'dsh_get_task_status / dsh_get_result for progress. Long tasks run in the background.',
+        'same agent loop (never a fresh agent). Returns immediately. For a multi-step goal or ' +
+        'execution plan prefer dsh_start_goal + dsh_wait_goal instead of polling this low-level API.',
       inputSchema: z.object({
         session_id: z.string().min(1),
         message: z.string().min(1).max(20000),
@@ -148,7 +148,8 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       description:
         'Status vocabulary: idle, queued, running, waiting_for_user, waiting_for_approval, ' +
         'completed, failed, cancelled, blocked, max-tokens, interrupted. Also reports pending ' +
-        'inbox items and any waiting approvals/questions with their ids.',
+        'inbox items and any waiting approvals/questions with their ids. For long supervised ' +
+        'goals prefer dsh_wait_goal, which long-polls instead of returning one snapshot.',
       inputSchema: z.object({ session_id: z.string().min(1) }),
     },
     safe(async (args: { session_id: string }) => bridge.getTaskStatus(args.session_id)),
@@ -160,7 +161,8 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       title: 'Final result of the last turn',
       description:
         'Last turn\'s assistant text, status, tool calls, changed files (from the session log, ' +
-        'not guessed) and structured error when the turn failed.',
+        'not guessed) and structured error when the turn failed. dsh_wait_goal already returns a ' +
+        'bounded final summary when the goal is terminal; use this for a more detailed check.',
       inputSchema: z.object({
         session_id: z.string().min(1),
         max_chars: z.number().int().min(100).max(100000).optional().describe('Max chars of assistant text'),
@@ -176,7 +178,9 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       title: 'Cancel the running task',
       description:
         'Cancel the active turn of a live session through DSH\'s own cancel mechanism ' +
-        '(agent.cancel). No processes are killed; the turn ends with an aborted reason.',
+        '(agent.cancel). No processes are killed; the turn ends with an aborted reason. For ' +
+        'supervised goals prefer dsh_stop_goal, which is idempotent and also fails-closed any ' +
+        'pending approval or question.',
       inputSchema: z.object({ session_id: z.string().min(1) }),
     },
     safe(async (args: { session_id: string }) => bridge.cancelTask(args.session_id)),
@@ -217,6 +221,62 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     },
     safe(async (args: { session_id: string; approval_id: string; decision: 'approve' | 'reject' }) =>
       bridge.approve(args.session_id, args.approval_id, args.decision)),
+  );
+
+  server.registerTool(
+    'dsh_start_goal',
+    {
+      title: 'Start a supervised DSH goal',
+      description:
+        'Use this when the user gives DSH a multi-step goal or an execution plan. Creates or ' +
+        'continues a native DSH session, writes the goal+plan as a user message, and returns ' +
+        'continuation_required + next_tool_call. If continuation_required is true, immediately ' +
+        'call dsh_wait_goal in this same assistant turn. Do not tell the user the task is merely ' +
+        'running in the background. Optional request_id makes connector retries idempotent.',
+      inputSchema: z.object({
+        workspace: z.string().min(1).describe('Workspace id, path, or title from dsh_list_workspaces'),
+        goal: z.string().min(1).max(20000).describe('The completion target for DSH'),
+        plan: z.string().max(20000).optional().describe('Optional execution plan DSH should follow'),
+        session_id: z.string().optional().describe('Continue this existing DSH session; omit to create a new one'),
+        request_id: z.string().min(1).max(200).optional().describe('Idempotency key for connector retries in this process'),
+      }),
+    },
+    safe(async (args: { workspace: string; goal: string; plan?: string; session_id?: string; request_id?: string }) =>
+      bridge.startGoal(args)),
+  );
+
+  server.registerTool(
+    'dsh_wait_goal',
+    {
+      title: 'Wait on a supervised DSH goal',
+      description:
+        'Bounded long-poll (default 25s, max 30s) of one DSH session. If continuation_required is ' +
+        'true, call this tool again immediately in the same assistant turn unless user action is ' +
+        'required. Do not end the turn while continuation_required is true. Do not tell the user ' +
+        'the task is running in the background and stop. waiting_for_approval / waiting_for_user ' +
+        'stop the loop so you can ask the human, then dsh_approve or dsh_answer_question, then ' +
+        'call this again. Never auto-approve or guess answers.',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        wait_seconds: z.number().int().min(1).max(30).optional().describe('Max seconds to wait (default 25)'),
+      }),
+    },
+    safe(async (args: { session_id: string; wait_seconds?: number }) =>
+      bridge.waitGoal(args.session_id, args.wait_seconds)),
+  );
+
+  server.registerTool(
+    'dsh_stop_goal',
+    {
+      title: 'Stop a supervised DSH goal',
+      description:
+        'Use when the user asks to stop, cancel, or interrupt the supervised DSH goal. Idempotent: ' +
+        'already completed/cancelled/failed sessions return already_stopped=true without error. ' +
+        'Cancels through DSH agent.cancel and fails-closed any pending approval or question. ' +
+        'Does not kill processes.',
+      inputSchema: z.object({ session_id: z.string().min(1) }),
+    },
+    safe(async (args: { session_id: string }) => bridge.stopGoal(args.session_id)),
   );
 
   return server;

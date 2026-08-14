@@ -1,5 +1,5 @@
 /**
- * MCP server surface: the eleven dsh_* tools ChatGPT calls. Every tool maps
+ * MCP server surface: the fourteen dsh_* tools ChatGPT calls. Every tool maps
  * onto a Bridge operation; nothing here reaches the filesystem, the shell,
  * or DSH internals directly. Outputs are JSON text blocks; failures are
  * reported as isError results with { error: { code, message } }.

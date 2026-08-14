@@ -179,6 +179,66 @@ try {
   check('no sk- keys in health', !/sk-[A-Za-z0-9]{8,}/.test(healthText));
   check('no bearer tokens in health', !/Bearer\s+[A-Za-z0-9._~+/=-]{12,}/i.test(healthText));
   check('health never reports the token itself', !healthText.includes(readToken()) || readToken() === '');
+  check('goalSupervision capability', health2.parsed?.capabilities?.goalSupervision === true);
+
+  console.log('\n[12] Goal Supervision loop');
+  const requestId = `dogfood-goal-${Date.now()}`;
+  const goalArgs = {
+    workspace: target,
+    goal: 'Reply with exactly GOAL-OK and stop. Do not modify files.',
+    plan: '1. Acknowledge\n2. Reply GOAL-OK\n3. Stop',
+    request_id: requestId,
+  };
+  const started = await call(client, 'dsh_start_goal', goalArgs);
+  check('dsh_start_goal accepted', started.isError === false && typeof started.parsed?.session_id === 'string', JSON.stringify(started.parsed));
+  check('start continuation_required', started.parsed?.continuation_required === true, JSON.stringify(started.parsed));
+  check('start next_tool_call is dsh_wait_goal', started.parsed?.next_tool_call?.name === 'dsh_wait_goal');
+  const goalSession = started.parsed?.session_id;
+  const retrySame = await call(client, 'dsh_start_goal', goalArgs);
+  check('request_id retry reuses session', retrySame.isError === false && retrySame.parsed?.session_id === goalSession, JSON.stringify(retrySame.parsed));
+
+  let lastWait;
+  const goalDeadline = Date.now() + 600000;
+  while (Date.now() < goalDeadline) {
+    lastWait = await call(client, 'dsh_wait_goal', { session_id: goalSession, wait_seconds: 25 });
+    check('wait_goal call ok', lastWait.isError === false, JSON.stringify(lastWait.parsed));
+    if (lastWait.parsed?.continuation_required !== true) break;
+  }
+  check('goal reached a non-continuing state', lastWait?.parsed?.continuation_required === false, JSON.stringify(lastWait?.parsed));
+  if (lastWait?.parsed?.status === 'completed') {
+    check('completed goal is terminal', lastWait.parsed.terminal === true);
+    check('completed goal includes result summary', typeof lastWait.parsed.result?.summary === 'string');
+  }
+
+  console.log('\n[13] dsh_stop_goal idempotent');
+  const stop1 = await call(client, 'dsh_stop_goal', { session_id: goalSession });
+  check('stop accepted', stop1.isError === false && stop1.parsed?.stopped === true, JSON.stringify(stop1.parsed));
+  const stop2 = await call(client, 'dsh_stop_goal', { session_id: goalSession });
+  check('second stop already_stopped', stop2.isError === false && stop2.parsed?.already_stopped === true, JSON.stringify(stop2.parsed));
+
+  if (health2.parsed?.capabilities?.webSurface === true) {
+    console.log('\n[14] Web session.list parity (same runtime)');
+    try {
+      const listed = await fetch('http://127.0.0.1:3080/api/session.list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: crypto.randomUUID(),
+          method: 'session.list',
+          payload: {},
+        }),
+      });
+      const body = await listed.json();
+      const items = body?.result?.value?.items ?? body?.items ?? [];
+      const ids = items.map((item) => item.sessionId ?? item.session_id);
+      check('ChatGPT session visible in DSH Web session.list', ids.includes(goalSession), JSON.stringify(ids.slice(0, 8)));
+    } catch (error) {
+      check('ChatGPT session visible in DSH Web session.list', false, String(error));
+    }
+  } else {
+    check('webSurface is true (same runtime as DSH Web :3080)', false, 'boot --profile web with this plugin; do not use a separate chatgpt-bridge process');
+  }
 } finally {
   await client.close();
 }

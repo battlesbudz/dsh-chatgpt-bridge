@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveStatus, lastTurnEnd, foldPendingMessages } from '../../lib/status.js';
+import { deriveStatus, lastTurnEnd, foldPendingMessages, undecidedApprovals, openAskUserQuestions } from '../../lib/status.js';
 
 const ev = (type, data, seq = 0, time = 0) => ({ type, seq, time, data });
 
@@ -90,4 +90,27 @@ test('foldPendingMessages: inbox splices recover pending counts', () => {
   const folded = foldPendingMessages(events);
   assert.equal(folded.nextTurn, 1);
   assert.equal(folded.nextStep, 0);
+});
+
+test('undecidedApprovals: asked without decided remains pending', () => {
+  const events = [
+    ev('approval/asked', { id: 'a1', toolName: 'bash', callId: 'c1' }, 0),
+    ev('approval/asked', { id: 'a2', toolName: 'write' }, 1),
+    ev('approval/decided', { id: 'a1', outcome: 'allowed-once' }, 2),
+  ];
+  const pending = undecidedApprovals(events);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].id, 'a2');
+  assert.equal(pending[0].toolName, 'write');
+});
+
+test('openAskUserQuestions: open call without result', () => {
+  const events = [
+    ev('tool/call', { turn: 1, step: 1, callId: 'q1', name: 'ask_user_question', arguments: '{"questions":[]}' }, 0),
+    ev('tool/call', { turn: 1, step: 1, callId: 'q2', name: 'ask_user_question', arguments: '{}' }, 1),
+    ev('tool/result', { turn: 1, step: 1, message: { source: { callId: 'q1' } } }, 2),
+  ];
+  const open = openAskUserQuestions(events);
+  assert.equal(open.length, 1);
+  assert.equal(open[0].callId, 'q2');
 });

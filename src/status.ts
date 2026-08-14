@@ -67,6 +67,60 @@ export function deriveStatus(input: StatusInput): BridgeStatus {
   }
 }
 
+/** An approval/asked event that has no matching approval/decided. */
+export interface UndecidedApproval {
+  id: string;
+  toolName: string;
+  callId?: string;
+  reason?: string;
+}
+
+/**
+ * Fold durable approval audit events. Used when the Web api-proxy (not this
+ * process's parked map) owns the answerer.
+ */
+export function undecidedApprovals(events: readonly SessionEvent[]): UndecidedApproval[] {
+  const asked = new Map<string, UndecidedApproval>();
+  const decided = new Set<string>();
+  for (const event of events) {
+    const data = event.data as { id?: string; toolName?: string; callId?: string; reason?: string } | undefined;
+    if (event.type === 'approval/decided' && typeof data?.id === 'string') {
+      decided.add(data.id);
+    } else if (event.type === 'approval/asked' && typeof data?.id === 'string' && typeof data.toolName === 'string') {
+      asked.set(data.id, {
+        id: data.id,
+        toolName: data.toolName,
+        ...(data.callId === undefined ? {} : { callId: data.callId }),
+        ...(data.reason === undefined ? {} : { reason: data.reason }),
+      });
+    }
+  }
+  return [...asked.values()].filter((item) => !decided.has(item.id));
+}
+
+/** An ask_user_question tool call that has not yet produced a tool/result. */
+export interface OpenAskUser {
+  callId: string;
+  arguments: string;
+}
+
+/**
+ * Open ask_user_question calls. Questions are not durable session events;
+ * the in-flight tool call is the only log signal when the Web provider owns the slot.
+ */
+export function openAskUserQuestions(events: readonly SessionEvent[]): OpenAskUser[] {
+  const open = new Map<string, OpenAskUser>();
+  for (const event of events) {
+    if (event.type === 'tool/call' && event.data.name === 'ask_user_question') {
+      open.set(event.data.callId, { callId: event.data.callId, arguments: event.data.arguments });
+    } else if (event.type === 'tool/result') {
+      const callId = (event.data.message as { source?: { callId?: string } } | undefined)?.source?.callId;
+      if (callId !== undefined) open.delete(callId);
+    }
+  }
+  return [...open.values()];
+}
+
 /** One message pending in a session's inbox lists (cold fold of splice events). */
 export interface PendingFold {
   nextTurn: number;

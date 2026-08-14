@@ -1,10 +1,11 @@
 # dsh-chatgpt-bridge
 
-An MCP bridge that lets **ChatGPT Web** create, view, continue and control
+An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. The bridge only *connects* — DSH keeps its own session log, agent
-loop, tools, skills, subagents, workflows, approvals, sandbox and workspace
-security model. It is a standalone DSH plugin: **zero DSH core modifications**.
+Protocol**. v0.2.0 — *Visible Sessions & Goal Supervision*. The bridge only
+*connects* — DSH keeps its own session log, agent loop, tools, skills,
+subagents, workflows, approvals, sandbox and workspace security model. It is a
+standalone DSH plugin: **zero DSH core modifications**.
 
 > Self-hosted / dogfooding development: implemented against the installed DeepSeek
 > Harness source (`0.1.0-rc.6`) and verified end-to-end against a live local DSH
@@ -66,17 +67,34 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 The plugin is a standard DSH profile bundle. It currently targets DSH
 `0.1.0-rc.6`.
 
-### Install from npm (recommended)
+**Recommended: one DSH runtime for both Web `:3080` and the MCP bridge `:3456`.**
+ChatGPT-created sessions are native DSH sessions. The Web UI only sees them
+live if it shares `ctx.agents` / `ctx.sessions` with the bridge. Do not run a
+headless `chatgpt-bridge` profile *and* a separate `web` profile at the same
+time — that is two runtimes and live Web parity will fail.
 
-Create a dedicated profile, install the published package from npm, then boot
-that profile. These commands invoke the real DSH CLI directly and do not rely
-on a shell alias or function:
+### Install into the Web profile (recommended)
 
 ```bash
-# 1. create the profile and install dsh-chatgpt-bridge from npm
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.1.0
+# after npm ci && npm run build, or from npm:
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add "file:$PWD"
+# published: ... add dsh-chatgpt-bridge@0.2.0
 
-# 2. boot the profile
+# boot ONE process — Web :3080 and MCP :3456
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
+```
+
+`dsh_health.capabilities.webSurface` is `true` when the Web gateway is in this
+process.
+
+### Headless-only (optional)
+
+A dedicated `chatgpt-bridge` profile (no Web) still works. Sessions persist
+and can be resumed later, but DSH Web `:3080` will not stream them in real
+time.
+
+```bash
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.2.0
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
 ```
 
@@ -85,28 +103,24 @@ The published npm package is available at
 
 ### Install from source
 
-To develop or inspect the bridge locally, clone this repository, install its
-dependencies, build it, then add the checkout to a dedicated DSH profile:
-
 ```bash
-# 1. clone, install and build
 git clone https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git
 cd dsh-chatgpt-bridge
 npm ci
 npm run build
-
-# 2. create the profile and add this checkout (pnpm required; `file:` spec)
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add "file:$PWD"
-
-# 3. boot it
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add "file:$PWD"
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
 ```
 
 For either installation method, `dsh plugin` installs the package into the
 profile and, because the package declares `dsh.bundle.patch`, appends it to the
-profile's bundle list. The bundle patch adds the rows the bridge needs
-(storage, workspace registry, projection cache) plus the `chatgpt-bridge` row
-itself.
+profile's bundle list. The bundle patch inserts only the `chatgpt-bridge` row
+so it can sit on top of `dsh-web-app` without duplicating `storage` /
+`workspace` ids.
+
+A headless profile (no web-app) still needs those host rows. Copy
+[`cordis.headless.patch.yml`](./cordis.headless.patch.yml) into that profile's
+own `cordis.patch.yml`.
 
 If pnpm cannot run in your environment (e.g. symlinks blocked), install
 manually: create `$DSH_HOME/profiles/chatgpt-bridge/` with `package.json`
@@ -178,6 +192,45 @@ strictly an MCP client of the bridge.
 | `dsh_cancel_task` | Cancel through DSH's own `agent.cancel()` — no PID killing. |
 | `dsh_answer_question` | Answer a parked user question (`waiting_for_user`). |
 | `dsh_approve` | Decide one parked approval (`waiting_for_approval`) — requires the exact `approval_id` and an explicit `approve`/`reject`. No approve-all. |
+| `dsh_start_goal` | Hand DSH a multi-step goal/plan (new or existing session). Returns `continuation_required` + `next_tool_call`. |
+| `dsh_wait_goal` | Bounded long-poll (default 25s). If `continuation_required` is true, call again immediately. |
+| `dsh_stop_goal` | Idempotent stop/cancel/interrupt of the supervised goal. Fails closed pending approvals/questions. |
+
+### Goal Supervision (recommended for plans)
+
+```text
+ChatGPT plans the work
+      |
+      v
+dsh_start_goal(workspace, goal, plan?)
+      |
+      |  continuation_required=true
+      v
+dsh_wait_goal(session_id)   ---- still running ----+
+      |                                            |
+      |  continuation_required=true                |
+      +--------------------------------------------+
+      |
+      +-- waiting_for_approval --> ask user --> dsh_approve --> wait again
+      +-- waiting_for_user     --> ask user --> dsh_answer_question --> wait again
+      +-- completed / failed / cancelled --> done (result is in the wait payload)
+```
+
+- `continuation_required` is an MCP client contract: ChatGPT should call
+  `dsh_wait_goal` again **in the same assistant turn** until the loop stops.
+  Do not reply “the task is running in the background” and end the turn.
+- One MCP call waits internally (≈500ms polls, up to 25s). Do not spam
+  `dsh_get_task_status` every few hundred milliseconds.
+- `waiting_for_approval` / `waiting_for_user` set `needs_user_action` and
+  **do not** continue. Never auto-approve; never guess the answer.
+- `dsh_stop_goal` is the user-facing “stop DSH” tool. It is idempotent
+  (`already_stopped=true` if the session is already terminal).
+- Optional `request_id` on `dsh_start_goal` makes connector retries in the
+  **same process** idempotent. It is an in-memory map (cap 256), not a Goal
+  DB. After a process restart, continue with `session_id`.
+- `dsh_health.capabilities.goalSupervision` is always true in v0.2.
+
+Low-level tools remain for inspection and one-shot messages.
 
 ### Deliberately NOT exposed (first version)
 
@@ -189,6 +242,17 @@ agent uses DSH tools under DSH's approval/sandbox/workspace policy.
 ---
 
 ## Session lifecycle
+
+Preferred (v0.2 Goal Supervision):
+
+```text
+ChatGPT: dsh_start_goal(workspace, goal, plan)
+         -> { session_id, continuation_required, next_tool_call: dsh_wait_goal }
+ChatGPT: dsh_wait_goal(session_id)  (repeat while continuation_required)
+         -> { terminal: true, result: { summary, changed_files, todos } }
+```
+
+Low-level Session API (still supported):
 
 ```text
 ChatGPT: dsh_create_session(workspace)

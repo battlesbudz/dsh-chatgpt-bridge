@@ -6,6 +6,7 @@ import type { ResolvedBridgeConfig } from './config.js';
 import type { BridgeLogger } from './log.js';
 import { type BridgeStatus } from './status.js';
 import { type MessageRow, type ToolCallInfo } from './session-view.js';
+import { type GoalStartResult, type GoalWaitResult } from './goal.js';
 /** Typed bridge error with a stable machine-readable code. */
 export declare class BridgeError extends Error {
     readonly code: string;
@@ -19,6 +20,8 @@ export interface PendingApproval {
     callId?: string;
     reason?: string;
     resolve: (outcome: ApprovalOutcome) => void;
+    /** Set when the Web api-proxy parked this ask; settle via respond(). */
+    muxRpcId?: string;
 }
 /** One parked user question waiting on a ChatGPT answer. */
 export interface PendingQuestion {
@@ -26,6 +29,7 @@ export interface PendingQuestion {
     sessionId?: string;
     questions: AskUserQuestionItem[];
     resolve: (answer: AskUserQuestionAnswer) => void;
+    muxRpcId?: string;
 }
 /** Wire-safe approval summary shown in dsh_get_session / dsh_get_task_status. */
 export interface ApprovalSummary {
@@ -72,6 +76,8 @@ export interface HealthReport {
         userQuestions: boolean;
         approvals: boolean;
         workspaces: number;
+        webSurface: boolean;
+        goalSupervision: boolean;
     };
 }
 export interface WorkspaceView {
@@ -149,9 +155,16 @@ export declare class Bridge {
     private approvalsEnabled;
     private questionsEnabled;
     private started;
+    private readonly goalRequests;
+    private apiProxy;
+    private muxAbort;
+    /** Test hooks for bounded wait loops. */
+    now: () => number;
+    sleep: (ms: number) => Promise<void>;
     constructor(ctx: Context, cfg: ResolvedBridgeConfig, log: BridgeLogger);
     /** Register the approval answerer and the user-questions provider. */
     start(): void;
+    private adopt;
     /** Count of bridge-created sessions still live. */
     managedCount(): number;
     private agentOptions;
@@ -208,6 +221,22 @@ export declare class Bridge {
         };
         updated_at?: string;
     }>;
+    startGoal(input: {
+        workspace: string;
+        goal: string;
+        plan?: string;
+        session_id?: string;
+        request_id?: string;
+    }): Promise<GoalStartResult>;
+    waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult>;
+    stopGoal(sessionId: string): Promise<{
+        session_id: string;
+        stopped: true;
+        already_stopped: boolean;
+        status: BridgeStatus;
+    }>;
+    private failClosedWaiting;
+    private goalSnapshot;
     answerQuestion(questionId: string, sessionId: string | undefined, answer: {
         selected: string[];
         custom?: string;

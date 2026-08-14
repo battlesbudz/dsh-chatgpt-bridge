@@ -27,6 +27,8 @@ import { redactText } from './redact.js';
 import {
   deriveStatus,
   foldPendingMessages,
+  openAskUserQuestions,
+  undecidedApprovals,
   type BridgeStatus,
 } from './status.js';
 import {
@@ -40,6 +42,29 @@ import {
   type MessageRow,
   type ToolCallInfo,
 } from './session-view.js';
+import {
+  RequestIdMap,
+  WAIT_POLL_MS,
+  buildGoalMessage,
+  clampWaitSeconds,
+  fingerprintStart,
+  isActiveStatus,
+  isTerminalStatus,
+  mapStartGoal,
+  mapWaitGoal,
+  titleFromGoal,
+  type GoalStartResult,
+  type GoalWaitResult,
+} from './goal.js';
+import {
+  asApiProxy,
+  cancelQuestion,
+  compositionHasWebGateway,
+  respondApproval,
+  respondQuestion,
+  startMuxMirror,
+  type ApiProxyLike,
+} from './web-gateway.js';
 import { BRIDGE_NAME, BRIDGE_VERSION } from './version.js';
 
 /** Typed bridge error with a stable machine-readable code. */
@@ -60,6 +85,8 @@ export interface PendingApproval {
   callId?: string;
   reason?: string;
   resolve: (outcome: ApprovalOutcome) => void;
+  /** Set when the Web api-proxy parked this ask; settle via respond(). */
+  muxRpcId?: string;
 }
 
 /** One parked user question waiting on a ChatGPT answer. */
@@ -68,6 +95,7 @@ export interface PendingQuestion {
   sessionId?: string;
   questions: AskUserQuestionItem[];
   resolve: (answer: AskUserQuestionAnswer) => void;
+  muxRpcId?: string;
 }
 
 /** Wire-safe approval summary shown in dsh_get_session / dsh_get_task_status. */
@@ -106,6 +134,8 @@ export interface HealthReport {
     userQuestions: boolean;
     approvals: boolean;
     workspaces: number;
+    webSurface: boolean;
+    goalSupervision: boolean;
   };
 }
 
@@ -200,6 +230,12 @@ export class Bridge {
   private approvalsEnabled = false;
   private questionsEnabled = false;
   private started = false;
+  private readonly goalRequests = new RequestIdMap();
+  private apiProxy: ApiProxyLike | undefined;
+  private muxAbort: AbortController | undefined;
+  /** Test hooks for bounded wait loops. */
+  now: () => number = () => Date.now();
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   constructor(ctx: Context, cfg: ResolvedBridgeConfig, log: BridgeLogger) {
     this.ctx = ctx;
@@ -213,62 +249,119 @@ export class Bridge {
   start(): void {
     if (this.started) return;
     this.started = true;
-    // Approval answerer: park decisions for bridge-created sessions, forward
-    // everything else to the next answerer (e.g. the web UI).
-    this.ctx.on('approval/request', (request, next) => {
-      if (!this.managed.has(request.agent.id)) return next();
-      const id = `approval-${randomUUID()}`;
-      const pending: PendingApproval = {
-        id,
-        sessionId: request.agent.id,
-        toolName: request.toolName,
-        callId: request.callId,
-        reason: request.reason,
-        resolve: () => {},
-      };
-      const decision = new Promise<ApprovalOutcome>((resolve) => {
-        pending.resolve = resolve;
-      });
-      this.approvals.set(id, pending);
-      this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName})`);
-      request.signal?.addEventListener(
-        'abort',
-        () => {
-          if (this.approvals.delete(id)) {
-            this.log.info(`approval ${id} withdrawn (turn aborted)`);
-            pending.resolve('cancelled');
-          }
-        },
-        { once: true },
-      );
-      return decision;
-    });
-    this.approvalsEnabled = true;
+    this.apiProxy = asApiProxy(this.ctx.get('apiProxy'));
+    // api-proxy starts later than this plugin (more inject deps). If the
+    // loader already lists it, do not steal the userQuestions slot.
+    const webGatewayPending = this.apiProxy === undefined && compositionHasWebGateway(this.ctx);
 
-    // User-questions provider: single-slot service; the web UI may already
-    // own the slot in a web profile — then questions flow through it.
-    const userQuestions = this.ctx.get('userQuestions');
-    if (userQuestions !== undefined) {
-      try {
-        userQuestions.registerProvider({
-          ask: async (request) => {
-            const id = `question-${++this.questionSeq}`;
-            const sessionId = request.agent?.id;
-            return new Promise<AskUserQuestionAnswer>((resolve) => {
-              this.questions.set(id, { id, sessionId, questions: request.questions, resolve });
-              this.log.info(`question ${id} pending for session ${sessionId ?? '(no agent)'}`);
-            });
+    if (this.apiProxy !== undefined || webGatewayPending) {
+      // Same process as DSH Web: observe mux, settle through respond(). Do not
+      // steal the single userQuestions slot or the approval waterfall.
+      this.approvalsEnabled = true;
+      this.questionsEnabled = true;
+      const attachMux = (api: ApiProxyLike): void => {
+        this.apiProxy = api;
+        this.muxAbort?.abort();
+        this.muxAbort = new AbortController();
+        startMuxMirror(
+          api,
+          {
+            onApprovalRequested: (pending) => {
+              this.approvals.set(pending.approvalId, {
+                id: pending.approvalId,
+                sessionId: pending.sessionId,
+                toolName: pending.toolName,
+                callId: pending.callId,
+                reason: pending.reason,
+                muxRpcId: pending.rpcId,
+                resolve: () => {},
+              });
+              this.log.info(`approval ${pending.approvalId} mirrored from Web mux for session ${pending.sessionId}`);
+            },
+            onApprovalResolved: (_sessionId, approvalId) => {
+              this.approvals.delete(approvalId);
+            },
+            onQuestionRequested: (pending) => {
+              this.questions.set(pending.rpcId, {
+                id: pending.rpcId,
+                sessionId: pending.sessionId,
+                questions: pending.questions as AskUserQuestionItem[],
+                muxRpcId: pending.rpcId,
+                resolve: () => {},
+              });
+              this.log.info(`question ${pending.rpcId} mirrored from Web mux for session ${pending.sessionId}`);
+            },
+            onQuestionResolved: (_sessionId, questionRpcId) => {
+              this.questions.delete(questionRpcId);
+            },
           },
+          this.muxAbort.signal,
+          (message) => this.log.warn(`apiProxy mux mirror ended: ${redactText(message)}`),
+        );
+      };
+      if (this.apiProxy !== undefined) {
+        attachMux(this.apiProxy);
+      } else {
+        (this.ctx as unknown as { inject(deps: string[], cb: () => void): void }).inject(['apiProxy'], () => {
+          const api = asApiProxy(this.ctx.get('apiProxy'));
+          if (api !== undefined) attachMux(api);
         });
-        this.questionsEnabled = true;
-      } catch (error) {
-        this.log.warn(`userQuestions provider slot already taken by another plugin; questions will flow through it: ${redactText(String(error))}`);
-        this.questionsEnabled = false;
+      }
+    } else {
+      // Headless: this process owns the answerer seams.
+      this.ctx.on('approval/request', (request, next) => {
+        if (!this.managed.has(request.agent.id)) return next();
+        const id = `approval-${randomUUID()}`;
+        const pending: PendingApproval = {
+          id,
+          sessionId: request.agent.id,
+          toolName: request.toolName,
+          callId: request.callId,
+          reason: request.reason,
+          resolve: () => {},
+        };
+        const decision = new Promise<ApprovalOutcome>((resolve) => {
+          pending.resolve = resolve;
+        });
+        this.approvals.set(id, pending);
+        this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName})`);
+        request.signal?.addEventListener(
+          'abort',
+          () => {
+            if (this.approvals.delete(id)) {
+              this.log.info(`approval ${id} withdrawn (turn aborted)`);
+              pending.resolve('cancelled');
+            }
+          },
+          { once: true },
+        );
+        return decision;
+      });
+      this.approvalsEnabled = true;
+
+      const userQuestions = this.ctx.get('userQuestions');
+      if (userQuestions !== undefined) {
+        try {
+          userQuestions.registerProvider({
+            ask: async (request) => {
+              const id = `question-${++this.questionSeq}`;
+              const sessionId = request.agent?.id;
+              return new Promise<AskUserQuestionAnswer>((resolve) => {
+                this.questions.set(id, { id, sessionId, questions: request.questions, resolve });
+                this.log.info(`question ${id} pending for session ${sessionId ?? '(no agent)'}`);
+              });
+            },
+          });
+          this.questionsEnabled = true;
+        } catch (error) {
+          this.log.warn(`userQuestions provider slot already taken by another plugin; questions will flow through it: ${redactText(String(error))}`);
+          this.questionsEnabled = false;
+        }
       }
     }
 
-    // Resolve every parked interaction on teardown (fail-closed, never grant).
     (this.ctx as unknown as { on(event: string, cb: () => void): void }).on('dispose', () => {
+      this.muxAbort?.abort();
       for (const pending of [...this.approvals.values()]) {
         this.approvals.delete(pending.id);
         pending.resolve('cancelled');
@@ -278,6 +371,10 @@ export class Bridge {
         pending.resolve({ answers: [] });
       }
     });
+  }
+
+  private adopt(sessionId: string): void {
+    this.managed.add(sessionId);
   }
 
   /** Count of bridge-created sessions still live. */
@@ -463,6 +560,8 @@ export class Bridge {
         userQuestions: this.questionsEnabled,
         approvals: this.approvalsEnabled,
         workspaces: workspaces.length,
+        webSurface: this.apiProxy !== undefined || this.ctx.get('webRuntime') !== undefined,
+        goalSupervision: true,
       },
     };
   }
@@ -493,7 +592,7 @@ export class Bridge {
         `failed to create DSH session in workspace "${workspace.title}": ${redactText(error instanceof Error ? error.message : String(error))}`,
       );
     }
-    this.managed.add(sessionId);
+    this.adopt(sessionId);
     try {
       await workspace.attachSession(SessionId(sessionId));
     } catch (error) {
@@ -519,6 +618,7 @@ export class Bridge {
 
   async sendMessage(sessionId: string, message: string): Promise<{ session_id: string; accepted: boolean }> {
     if (message.trim() === '') throw new BridgeError('EMPTY_MESSAGE', 'message must not be empty');
+    this.adopt(sessionId);
     const agent = await this.ensureAgent(sessionId);
     agent.followup(
       createUserMessage({
@@ -538,23 +638,59 @@ export class Bridge {
     return { session_id: sessionId, cancelled: true };
   }
 
-  private waitingFor(sessionId: string): WaitingState {
-    const approvals = [...this.approvals.values()]
-      .filter((pending) => pending.sessionId === sessionId)
-      .map((pending) => ({
+  private waitingFor(sessionId: string, events?: readonly SessionEvent[]): WaitingState {
+    const seenApprovals = new Set<string>();
+    const approvals: ApprovalSummary[] = [];
+    for (const pending of this.approvals.values()) {
+      if (pending.sessionId !== sessionId) continue;
+      seenApprovals.add(pending.id);
+      approvals.push({
         approval_id: pending.id,
         session_id: pending.sessionId,
         tool_name: pending.toolName,
         ...(pending.callId === undefined ? {} : { call_id: pending.callId }),
         ...(pending.reason === undefined ? {} : { reason: pending.reason }),
-      }));
-    const questions = [...this.questions.values()]
-      .filter((pending) => pending.sessionId === sessionId)
-      .map((pending) => ({
+      });
+    }
+    if (events !== undefined) {
+      for (const item of undecidedApprovals(events)) {
+        if (seenApprovals.has(item.id)) continue;
+        approvals.push({
+          approval_id: item.id,
+          session_id: sessionId,
+          tool_name: item.toolName,
+          ...(item.callId === undefined ? {} : { call_id: item.callId }),
+          ...(item.reason === undefined ? {} : { reason: item.reason }),
+        });
+      }
+    }
+    const seenQuestions = new Set<string>();
+    const questions: QuestionSummary[] = [];
+    for (const pending of this.questions.values()) {
+      if (pending.sessionId !== sessionId) continue;
+      seenQuestions.add(pending.id);
+      questions.push({
         question_id: pending.id,
         ...(pending.sessionId === undefined ? {} : { session_id: pending.sessionId }),
         questions: pending.questions,
-      }));
+      });
+    }
+    if (events !== undefined) {
+      for (const item of openAskUserQuestions(events)) {
+        if (seenQuestions.has(item.callId)) continue;
+        let parsed: { questions?: AskUserQuestionItem[] } | undefined;
+        try {
+          parsed = JSON.parse(item.arguments) as { questions?: AskUserQuestionItem[] };
+        } catch {
+          parsed = undefined;
+        }
+        questions.push({
+          question_id: item.callId,
+          session_id: sessionId,
+          questions: parsed?.questions ?? [],
+        });
+      }
+    }
     return { approvals, questions };
   }
 
@@ -562,7 +698,7 @@ export class Bridge {
     const pending = view.agent !== undefined
       ? { nextTurn: view.agent.inbox.nextTurn.length, nextStep: view.agent.inbox.nextStep.length }
       : foldPendingMessages(view.events);
-    const waiting = this.waitingFor(sessionId);
+    const waiting = this.waitingFor(sessionId, view.events);
     return deriveStatus({
       live: view.agent !== undefined,
       agentStatus: view.agent?.status,
@@ -599,7 +735,7 @@ export class Bridge {
     const pending = view.agent !== undefined
       ? { nextTurn: view.agent.inbox.nextTurn.length, nextStep: view.agent.inbox.nextStep.length }
       : foldPendingMessages(view.events);
-    const waiting = this.waitingFor(sessionId);
+    const waiting = this.waitingFor(sessionId, view.events);
     const status = await this.statusOf(sessionId, view);
     const title = await this.titleOf(view);
     const span = lastTurnSpan(view.events);
@@ -653,8 +789,8 @@ export class Bridge {
             live: true,
             agentStatus: agent.status,
             hasPendingInbox: agent.inbox.hasPending,
-            pendingApprovals: this.waitingFor(header.id).approvals.length,
-            pendingQuestions: this.waitingFor(header.id).questions.length,
+            pendingApprovals: this.waitingFor(header.id, agent.session.events).approvals.length,
+            pendingQuestions: this.waitingFor(header.id, agent.session.events).questions.length,
             events: agent.session.events,
           });
       out.push({
@@ -736,10 +872,140 @@ export class Bridge {
       live: view.agent !== undefined,
       ...(view.agent === undefined ? {} : { agent_status: view.agent.status }),
       pending,
-      waiting: this.waitingFor(sessionId),
+      waiting: this.waitingFor(sessionId, view.events),
       ...(span === undefined ? {} : { last_turn: { turn: span.turn, ...(span.reason === undefined ? {} : { reason: span.reason.kind }) } }),
       updated_at: lastEventTime(view.events),
     };
+  }
+
+  // ── Goal Supervision ──────────────────────────────────────────────────────
+
+  async startGoal(input: {
+    workspace: string;
+    goal: string;
+    plan?: string;
+    session_id?: string;
+    request_id?: string;
+  }): Promise<GoalStartResult> {
+    if (input.goal.trim() === '') throw new BridgeError('EMPTY_GOAL', 'goal must not be empty');
+    const fingerprint = fingerprintStart(input);
+    if (input.request_id !== undefined && input.request_id !== '') {
+      const existing = this.goalRequests.get(input.request_id);
+      if (existing !== undefined) {
+        if (existing.fingerprint !== fingerprint) {
+          throw new BridgeError(
+            'REQUEST_ID_CONFLICT',
+            `request_id "${input.request_id}" was already used with different start_goal arguments`,
+          );
+        }
+        this.adopt(existing.sessionId);
+        const view = await this.loadView(existing.sessionId);
+        return mapStartGoal(existing.sessionId, await this.statusOf(existing.sessionId, view));
+      }
+    }
+    let sessionId = input.session_id;
+    if (sessionId === undefined || sessionId === '') {
+      const created = await this.createSession(input.workspace, titleFromGoal(input.goal));
+      sessionId = created.session_id;
+    } else {
+      await this.resolveWorkspace(input.workspace);
+      this.adopt(sessionId);
+    }
+    await this.sendMessage(sessionId, buildGoalMessage(input.goal, input.plan));
+    if (input.request_id !== undefined && input.request_id !== '') {
+      this.goalRequests.set(input.request_id, { sessionId, fingerprint });
+    }
+    const view = await this.loadView(sessionId);
+    return mapStartGoal(sessionId, await this.statusOf(sessionId, view));
+  }
+
+  async waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult> {
+    this.adopt(sessionId);
+    const seconds = clampWaitSeconds(waitSeconds);
+    const started = this.now();
+    const deadline = started + seconds * 1000;
+    let view = await this.loadView(sessionId);
+    let status = await this.statusOf(sessionId, view);
+    while (isActiveStatus(status) && this.now() < deadline) {
+      const remaining = deadline - this.now();
+      if (remaining <= 0) break;
+      await this.sleep(Math.min(WAIT_POLL_MS, remaining));
+      view = await this.loadView(sessionId);
+      status = await this.statusOf(sessionId, view);
+    }
+    return this.goalSnapshot(sessionId, view, status, this.now() - started, seconds);
+  }
+
+  async stopGoal(sessionId: string): Promise<{
+    session_id: string;
+    stopped: true;
+    already_stopped: boolean;
+    status: BridgeStatus;
+  }> {
+    this.adopt(sessionId);
+    const view = await this.loadView(sessionId);
+    const status = await this.statusOf(sessionId, view);
+    if (isTerminalStatus(status) || status === 'unknown' || (status === 'idle' && view.agent === undefined)) {
+      return { session_id: sessionId, stopped: true, already_stopped: true, status };
+    }
+    if (status === 'idle' && view.agent !== undefined && !isActiveStatus(status)) {
+      return { session_id: sessionId, stopped: true, already_stopped: true, status };
+    }
+    await this.failClosedWaiting(sessionId);
+    const agent = this.ctx.agents.get(SessionId(sessionId));
+    if (agent !== undefined) agent.cancel({ kind: 'user' });
+    return { session_id: sessionId, stopped: true, already_stopped: false, status: 'cancelled' };
+  }
+
+  private async failClosedWaiting(sessionId: string): Promise<void> {
+    for (const pending of [...this.approvals.values()]) {
+      if (pending.sessionId !== sessionId) continue;
+      this.approvals.delete(pending.id);
+      if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
+        await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, pending.id, 'rejected');
+      } else {
+        pending.resolve('cancelled');
+      }
+    }
+    for (const pending of [...this.questions.values()]) {
+      if (pending.sessionId !== sessionId) continue;
+      this.questions.delete(pending.id);
+      if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
+        await cancelQuestion(this.apiProxy, pending.muxRpcId);
+      } else {
+        pending.resolve({ answers: [] });
+      }
+    }
+  }
+
+  private async goalSnapshot(
+    sessionId: string,
+    view: LoadedView,
+    status: BridgeStatus,
+    waitedMs: number,
+    waitSeconds: number,
+  ): Promise<GoalWaitResult> {
+    const waiting = this.waitingFor(sessionId, view.events);
+    const span = lastTurnSpan(view.events);
+    const todos = lastTodos(view.events);
+    const errorSummary = span?.reason !== undefined && span.reason.kind === 'error'
+      ? `${span.reason.error.code}: ${span.reason.error.message}`
+      : undefined;
+    return mapWaitGoal({
+      sessionId,
+      status,
+      waitedMs,
+      waitSeconds,
+      ...(todos === undefined ? {} : { todos }),
+      lastActivity: lastEventTime(view.events),
+      ...(span === undefined ? {} : { lastTurn: { turn: span.turn, ...(span.reason === undefined ? {} : { reason: span.reason.kind }) } }),
+      changedFiles: span === undefined ? [] : changedFilesForTurn(view.events, span.turn),
+      assistantSummary: span === undefined ? '' : assistantTextForTurn(view.events, span.turn),
+      ...(errorSummary === undefined ? {} : { errorSummary }),
+      ...(view.agent === undefined ? {} : { agentStatus: view.agent.status }),
+      approval: waiting.approvals[0],
+      question: waiting.questions[0],
+    });
   }
 
   // ── user questions / approvals ────────────────────────────────────────────
@@ -763,7 +1029,7 @@ export class Bridge {
       throw new BridgeError('INVALID_ANSWER', `question ${questionId} is single-select`);
     }
     this.questions.delete(questionId);
-    pending.resolve({
+    const resolved: AskUserQuestionAnswer = {
       answers: [
         {
           id: pending.questions[0]?.id ?? questionId,
@@ -771,7 +1037,15 @@ export class Bridge {
           ...(answer.custom === undefined ? {} : { custom: answer.custom }),
         },
       ],
-    });
+    };
+    if (pending.muxRpcId !== undefined && this.apiProxy !== undefined && pending.sessionId !== undefined) {
+      const receipt = await respondQuestion(this.apiProxy, pending.muxRpcId, pending.sessionId, resolved);
+      if (!receipt.accepted) {
+        throw new BridgeError('QUESTION_NOT_FOUND', `Web gateway rejected answer for ${questionId}: ${receipt.reason ?? 'not-pending'}`);
+      }
+    } else {
+      pending.resolve(resolved);
+    }
     this.log.info(`question ${questionId} answered`);
     return { answered: true };
   }
@@ -791,7 +1065,14 @@ export class Bridge {
     }
     this.approvals.delete(approvalId);
     const outcome: ApprovalOutcome = decision === 'approve' ? 'allowed-once' : 'rejected';
-    pending.resolve(outcome);
+    if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
+      const receipt = await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, approvalId, outcome);
+      if (!receipt.accepted) {
+        throw new BridgeError('APPROVAL_NOT_FOUND', `Web gateway rejected decision for ${approvalId}: ${receipt.reason ?? 'not-pending'}`);
+      }
+    } else {
+      pending.resolve(outcome);
+    }
     this.log.info(`approval ${approvalId} decided: ${decision}`);
     return { approval_id: approvalId, session_id: sessionId, decision, outcome };
   }

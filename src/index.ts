@@ -14,7 +14,7 @@ import { startHttpServer } from './http.js';
 export const name = 'chatgpt-bridge';
 
 /** Core services the bridge needs before it can start. */
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionTitle', 'agentDefaultModel'];
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionTitle', 'agentDefaultModel', 'loader'];
 
 /** Plugin configuration schema (schemastery, DSH convention). */
 export const Config = ConfigSchema;
