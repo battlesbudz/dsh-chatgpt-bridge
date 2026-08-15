@@ -9,7 +9,7 @@ const SECRET_PATTERNS: RegExp[] = [
   // Authorization: Bearer <token> as one unit.
   /(?:authorization|auth)\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   // Whole key=value assignments, so a pair is masked as one unit.
-  /(?:api[_-]?key|access[_-]?token|authorization|auth|secret|credential|cookie|session[_-]?token|password|passwd|token)\s*[:=]\s*["']?[^"'\s,;)]{6,}/gi,
+  /(?:api[_-]?key|access[_-]?token|authorization|auth|secret|credential|cookie|session[_-]?token|password|passwd|token|otp|one[-_]?time[-_]?password|2fa[-_]?code)\s*[:=]\s*["']?[^"'\s,;)]{4,}/gi,
   // Standalone bearer tokens.
   /bearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
   // OpenAI/DeepSeek-style API keys.
@@ -17,7 +17,7 @@ const SECRET_PATTERNS: RegExp[] = [
 ];
 
 /** Object keys whose whole value is secret-shaped. */
-const SECRET_KEYS = /^(authorization|api[-_]?key|access[-_]?key|access[-_]?token|secret|credential|cookie|set-cookie|token|password|passwd|refresh[-_]?token|session[-_]?token|proxy-auth|auth)$/i;
+const SECRET_KEYS = /^(authorization|api[-_]?key|access[-_]?key|access[-_]?token|secret|credential|cookie|set-cookie|token|password|passwd|refresh[-_]?token|session[-_]?token|proxy-auth|auth|otp|one[-_]?time[-_]?password|2fa[-_]?code)$/i;
 
 /** Redact secret-shaped substrings from one text value. */
 export function redactText(text: string): string {

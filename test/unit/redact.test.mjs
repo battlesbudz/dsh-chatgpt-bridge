@@ -20,6 +20,13 @@ test('redactText masks key=value assignments', () => {
   assert.ok(out.includes('[REDACTED]'));
 });
 
+test('redactValue masks otp and cookie keys used in Goal history', () => {
+  const out = redactValue({ otp: '123456', cookie: 'sid=xyz', Authorization: 'Bearer tokentokentoken' });
+  assert.equal(out.otp, '[REDACTED]');
+  assert.equal(out.cookie, '[REDACTED]');
+  assert.equal(out.Authorization, '[REDACTED]');
+});
+
 test('redactValue replaces secret-shaped keys wholesale', () => {
   const out = redactValue({ authorization: 'Bearer abc123', data: { cookie: 'sid=xyz', ok: 'fine', token: 'tok-999' } });
   assert.equal(out.authorization, '[REDACTED]');

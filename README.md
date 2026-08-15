@@ -2,7 +2,7 @@
 
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. v0.2.0 — *Visible Sessions & Goal Supervision*. The bridge only
+Protocol**. v0.3.0 — *Goal Control Plane*. The bridge only
 *connects* — DSH keeps its own session log, agent loop, tools, skills,
 subagents, workflows, approvals, sandbox and workspace security model. It is a
 standalone DSH plugin: **zero DSH core modifications**.
@@ -10,6 +10,225 @@ standalone DSH plugin: **zero DSH core modifications**.
 > Self-hosted / dogfooding development: implemented against the installed DeepSeek
 > Harness source (`0.1.0-rc.6`) and verified end-to-end against a live local DSH
 > runtime with the official MCP SDK client.
+
+---
+
+# Quick Start
+
+This gets a new user from zero to a verified ChatGPT ↔ DSH connection. Deep
+architecture and configuration details follow below — you do not need them to
+install and verify.
+
+## Requirements
+
+- **Node.js >= 22** installed and on your `PATH`.
+- **A working DeepSeek Harness (DSH) installation** — `dsh` on your `PATH`
+  (or use `pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6` in place of `dsh` in every
+  command below).
+- **A web profile is recommended.** The Web UI and the Bridge should run in
+  the same web profile/runtime so that ChatGPT-created sessions appear live
+  in DSH Web.
+- **ChatGPT-side MCP and write-action availability depends on your current
+  plan/workspace. Check OpenAI's current official documentation before
+  setup.**
+- **This plugin includes write/action tools** (`dsh_send_message`,
+  `dsh_start_goal`, `dsh_approve`, ...), not just read-only MCP. It drives a
+  real DSH agent that can modify files inside **registered workspaces** under
+  DSH's approval/sandbox policy. Treat it accordingly.
+
+## 1. Install
+
+Recommended — install the plugin into the web profile (from the published npm
+package):
+
+```bash
+dsh plugin --profile web add dsh-chatgpt-bridge
+```
+
+`npm install dsh-chatgpt-bridge` alone is not enough: the plugin must be
+added to a DSH profile bundle, which `dsh plugin ... add` does for you. See
+[Detailed install](#detailed-install) for source, headless, and manual
+variants.
+
+## 2. Start one shared DSH runtime
+
+```bash
+dsh web
+```
+
+Run the DSH Web UI and the Bridge in the **same** web profile/runtime.
+ChatGPT-created sessions are native DSH sessions; they only stream live in
+DSH Web when both share one runtime.
+
+| Endpoint | URL |
+| --- | --- |
+| DSH Web | http://127.0.0.1:3080 |
+| Bridge MCP | http://127.0.0.1:3456/mcp |
+
+## 3. Read the authentication token
+
+On first boot the bridge generates a token and persists it to
+`$DSH_HOME/chatgpt-bridge.token`. Read it with:
+
+Windows (PowerShell):
+
+```powershell
+Get-Content "$HOME\.dsh\chatgpt-bridge.token"
+```
+
+macOS / Linux:
+
+```bash
+cat ~/.dsh/chatgpt-bridge.token
+```
+
+> **Never commit this token to GitHub or paste it into a public chat.** It
+> authorizes MCP access to your DSH runtime. Alternatively, set
+> `DSH_CHATGPT_BRIDGE_TOKEN` yourself and the bridge uses it instead of the
+> generated file.
+
+## 4. Connect ChatGPT
+
+**ChatGPT Web cannot open a plain localhost MCP endpoint.** A URL like
+`http://127.0.0.1:3456/mcp` exists only on your machine; ChatGPT Web is a
+remote MCP client and cannot reach it directly.
+
+- If the Bridge runs on your machine, connect ChatGPT through the **Secure
+  MCP Tunnel / secure tunneling mechanism that OpenAI currently supports**
+  for MCP/custom apps. The tunnel forwards ChatGPT's requests to the loopback
+  endpoint.
+- Use the token from step 3 as the MCP **Authorization Bearer** token for the
+  connector/tunnel.
+- The Bridge keeps its localhost-first design: it binds `127.0.0.1`, never
+  exposes a public interface, and never self-hosts a tunnel.
+- The **stdio transport is not the ChatGPT Web quick path** — ChatGPT Web does
+  not launch local processes. See
+  [Advanced / other MCP clients](#advanced--other-mcp-clients) for stdio and
+  non-ChatGPT MCP clients.
+
+## 5. Scan / refresh tools
+
+After the MCP connection is established, **scan / refresh the MCP tools** in
+ChatGPT. v0.3.0 exposes **15 tools**, and `dsh_update_goal` must be present
+(it is the 15th). If the tool list looks stale, refresh/rescan the connector
+(see [Tool count is stale](#tool-count-is-stale--dsh_update_goal-missing-after-upgrade)).
+
+## 6. First verification
+
+Give ChatGPT this read-only acceptance prompt:
+
+```text
+请使用已连接的 DSH App，只做只读检查：
+1. 调用 dsh_health
+2. 调用 dsh_list_workspaces
+3. 不修改任何文件
+4. 返回 bridge version、health 和 workspace 名称
+```
+
+Expected:
+
+```text
+health = ok
+bridge version = 0.3.0
+```
+
+Then a minimal Goal Supervision example (still read-only):
+
+```text
+使用 dsh_start_goal 创建一个只读检查目标（workspace 用 dsh_list_workspaces
+查到的名称），goal 描述为“只读检查项目”，plan 为列出项目结构并总结
+README，constraints 使用 {"read_only": true}。然后反复调用 dsh_wait_goal
+直到 terminal，最后只汇报 health、goal revision 和总结，不修改任何文件。
+```
+
+---
+
+## Troubleshooting
+
+### ChatGPT cannot connect
+
+`http://127.0.0.1:3456/mcp` is a loopback address on your machine — ChatGPT
+Web cannot reach it as a remote MCP server. Check the **Secure MCP Tunnel /
+currently supported secure connection** method for MCP/custom apps: the
+tunnel must forward to the loopback endpoint with the bearer token.
+
+### 401 Unauthorized
+
+- Read the token: `Get-Content "$HOME\.dsh\chatgpt-bridge.token"`
+  (PowerShell) or `cat ~/.dsh/chatgpt-bridge.token` (macOS/Linux).
+- The connector must send it as the `Authorization: Bearer <token>` header.
+- The token belongs to the runtime that generated it. A different
+  `$DSH_HOME`, a regenerated token, or a mismatched `DSH_CHATGPT_BRIDGE_TOKEN`
+  all cause 401 — make sure the token matches the currently running runtime.
+
+### dsh_health works but no workspace appears
+
+`dsh_list_workspaces` only lists workspaces **already registered** in DSH.
+The bridge never auto-registers arbitrary paths; `dsh_create_session` with an
+unregistered path fails with `WORKSPACE_NOT_FOUND` on purpose. Register the
+workspace in DSH (Web profile workspace settings / DSH configuration) first.
+
+### Session exists but does not appear live in DSH Web
+
+The Bridge and DSH Web must run in the **same web profile/runtime**. Do not
+run a separate `chatgpt-bridge` runtime **and** a separate `web` runtime and
+expect live parity — sessions persist and can be resumed, but they will not
+stream in real time.
+
+### Tool count is stale / dsh_update_goal missing after upgrade
+
+Re-scan / refresh the MCP tools on the ChatGPT side after upgrading the
+plugin and restarting the profile. v0.3.0 exposes **15 tools**;
+`dsh_update_goal` is the 15th.
+
+### Port 3456 already in use
+
+Identify the process first — **never auto-kill an unknown process**. On
+Windows (PowerShell):
+
+```powershell
+Get-NetTCPConnection -LocalPort 3456 | Select-Object LocalAddress, LocalPort, OwningProcess
+Get-Process -Id <OwningProcess> | Select-Object Id, ProcessName, Path
+```
+
+On macOS/Linux:
+
+```bash
+lsof -iTCP:3456 -sTCP:LISTEN     # or: ss -ltnp 'sport = :3456'
+```
+
+If it is an old `dsh`/bridge process, stop it cleanly. Otherwise change the
+bridge `port` in the profile config (see
+[DSH configuration](#dsh-configuration)) or free the port.
+
+### Bridge error codes
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `WORKSPACE_NOT_FOUND` | The workspace is not registered in DSH; `dsh_list_workspaces` shows what is allowed. |
+| `SESSION_NOT_FOUND` | Unknown session id (never created, or persistence not mounted). |
+| `SESSION_NOT_LIVE` on cancel | The session is not loaded in this process; only live sessions can be cancelled. |
+| `APPROVAL_NOT_FOUND` / `QUESTION_NOT_FOUND` | The decision was already taken or the bridge restarted (parked decisions are in-memory). |
+| question provider slot taken (log) | A web UI is attached and owns user questions; answer them in the UI. |
+| Cold sessions show no title in `dsh_list_sessions` | Cold titles come from the projection cache; concurrent DSH profiles sharing the cache can clobber rows. Single-profile deployments get titles. |
+
+---
+
+## 60-second smoke test
+
+After completing Quick Start steps 1–3:
+
+1. `dsh web` — one shared runtime.
+2. Establish the MCP tunnel to `http://127.0.0.1:3456/mcp`.
+3. In ChatGPT: **Scan Tools**.
+4. Ask ChatGPT to call `dsh_health`.
+5. Confirm:
+   - `health = ok`
+   - `bridge version = 0.3.0`
+   - **tool count = 15**
+   - `dsh_update_goal` exists in the tool list
+6. Optionally call `dsh_list_workspaces` to confirm your workspace is
+   visible.
 
 ---
 
@@ -58,11 +277,11 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 | Protocol version | negotiated by `@modelcontextprotocol/sdk` 1.30.0 (official MCP SDK) |
 | Authentication | Bearer token (default): config token → `DSH_CHATGPT_BRIDGE_TOKEN` env → generated token persisted to `$DSH_HOME/chatgpt-bridge.token` |
 | Local endpoint | `http://127.0.0.1:3456/mcp` (loopback only by default) |
-| ChatGPT connection | any official MCP client: a local connector at the endpoint with the token, or a remote connector tunneled to the loopback endpoint. The bridge never exposes anything public by itself. |
+| ChatGPT connection | any official MCP client: a local connector at the endpoint with the token, or a remote connector tunneled to the loopback endpoint (e.g. OpenAI's supported Secure MCP Tunnel). The bridge never exposes anything public by itself. |
 
 ---
 
-## Install
+## Detailed install
 
 The plugin is a standard DSH profile bundle. It currently targets DSH
 `0.1.0-rc.6`.
@@ -75,10 +294,12 @@ time — that is two runtimes and live Web parity will fail.
 
 ### Install into the Web profile (recommended)
 
+The Quick Start uses `dsh plugin --profile web add dsh-chatgpt-bridge`. If
+`dsh` is not on your `PATH`, the equivalent is:
+
 ```bash
-# after npm ci && npm run build, or from npm:
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add "file:$PWD"
-# published: ... add dsh-chatgpt-bridge@0.2.0
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add dsh-chatgpt-bridge
+# published: ... add dsh-chatgpt-bridge@0.3.0
 
 # boot ONE process — Web :3080 and MCP :3456
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
@@ -94,7 +315,7 @@ and can be resumed later, but DSH Web `:3080` will not stream them in real
 time.
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.2.0
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.3.0
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
 ```
 
@@ -157,20 +378,24 @@ the stdio transport stays clean.
 
 ---
 
-## ChatGPT MCP configuration
+## Advanced / other MCP clients
 
-1. Start the bridge (`dsh --profile chatgpt-bridge`) and note the token:
-   `Get-Content $env:USERPROFILE\.dsh\chatgpt-bridge.token` (or set
-   `DSH_CHATGPT_BRIDGE_TOKEN` yourself).
-2. In ChatGPT, add a **custom MCP connector**:
-   - **Local:** point it at `http://127.0.0.1:3456/mcp` with the bearer token
-     as the authorization header; or use a stdio connector whose command is
-     `dsh --profile chatgpt-bridge` (a stdio-mode profile).
-   - **Remote/tunneled:** run the bridge on the loopback and connect ChatGPT
-     through the platform's supported secure MCP tunnel mechanism. The
-     bridge itself never binds a public interface and never self-hosts a
-     tunnel.
-3. Verify with `dsh_health`.
+The Bridge supports two MCP transports:
+
+| Transport | When to use |
+| --- | --- |
+| **Streamable HTTP** (default) | ChatGPT Web via a secure tunnel, and any HTTP-capable MCP client that can reach the loopback endpoint. |
+| **stdio** | Local MCP clients that launch a child process on the same machine as the bridge. |
+
+The stdio transport is **not** the ChatGPT Web quick path: ChatGPT Web does
+not launch local processes, so it cannot use a stdio connector. Use stdio
+only with clients that run on the same machine as the bridge.
+
+To use stdio, set `transport: stdio` in the profile config (see
+[DSH configuration](#dsh-configuration)) and point the client at the command
+that boots the bridge profile (`dsh --profile chatgpt-bridge`). The boot
+process must not print to stdout; bridge logs go to
+`$DSH_HOME/chatgpt-bridge.log` only.
 
 No ChatGPT cookies, logins, or web sessions are ever touched: ChatGPT is
 strictly an MCP client of the bridge.
@@ -192,7 +417,8 @@ strictly an MCP client of the bridge.
 | `dsh_cancel_task` | Cancel through DSH's own `agent.cancel()` — no PID killing. |
 | `dsh_answer_question` | Answer a parked user question (`waiting_for_user`). |
 | `dsh_approve` | Decide one parked approval (`waiting_for_approval`) — requires the exact `approval_id` and an explicit `approve`/`reject`. No approve-all. |
-| `dsh_start_goal` | Hand DSH a multi-step goal/plan (new or existing session). Returns `continuation_required` + `next_tool_call`. |
+| `dsh_start_goal` | Hand DSH a multi-step goal/plan (new or existing session). Existing `session_id` revises the Goal (revision +1). Optional `execution_mode` / `constraints`. |
+| `dsh_update_goal` | Revise / defer / resume an existing Goal. `session_id` required; never creates a session. |
 | `dsh_wait_goal` | Bounded long-poll (default 25s). If `continuation_required` is true, call again immediately. |
 | `dsh_stop_goal` | Idempotent stop/cancel/interrupt of the supervised goal. Fails closed pending approvals/questions. |
 
@@ -218,19 +444,78 @@ dsh_wait_goal(session_id)   ---- still running ----+
 
 - `continuation_required` is an MCP client contract: ChatGPT should call
   `dsh_wait_goal` again **in the same assistant turn** until the loop stops.
-  Do not reply “the task is running in the background” and end the turn.
+  Do not reply "the task is running in the background" and end the turn.
 - One MCP call waits internally (≈500ms polls, up to 25s). Do not spam
   `dsh_get_task_status` every few hundred milliseconds.
 - `waiting_for_approval` / `waiting_for_user` set `needs_user_action` and
   **do not** continue. Never auto-approve; never guess the answer.
-- `dsh_stop_goal` is the user-facing “stop DSH” tool. It is idempotent
+- `dsh_stop_goal` is the user-facing "stop DSH" tool. It is idempotent
   (`already_stopped=true` if the session is already terminal).
 - Optional `request_id` on `dsh_start_goal` makes connector retries in the
   **same process** idempotent. It is an in-memory map (cap 256), not a Goal
   DB. After a process restart, continue with `session_id`.
-- `dsh_health.capabilities.goalSupervision` is always true in v0.2.
+- `dsh_health.capabilities.goalSupervision` is always true in v0.2+.
+- The stabilization work originally tracked as "0.2.1" (never released) is
+  folded into v0.3.0: reconciled todos (from tool/result facts, not assistant
+  text), `progress_delta` on `dsh_wait_goal`, structured `blocked` +
+  `remaining_runnable_steps`, and fail-safe cleanup of goal-owned temps.
+- v0.3.0 adds `dsh_update_goal` (15 tools) and a Goal Control Plane: revisions,
+  execution modes, structured constraints, deferred/resume, bounded history.
 
 Low-level tools remain for inspection and one-shot messages.
+
+### Goal lifecycle
+
+```text
+create   dsh_start_goal(workspace, goal, plan?, execution_mode?, constraints?)
+           -> revision 1, session_id
+run      DSH agent works; ChatGPT calls dsh_wait_goal
+wait     continuation_required → wait again
+         waiting_for_user / waiting_for_approval → ask human, then continue
+revise   dsh_update_goal(action=revise)  or  dsh_start_goal(..., session_id)
+           -> revision +1, previous snapshot kept
+defer    dsh_update_goal(action=defer, defer_steps=["npm_publish"])
+           -> step is deferred (not failed); independent branches stay runnable
+resume   dsh_update_goal(action=resume, resume_steps=["npm_publish"])
+           -> same session_id + goal_id; completed steps are not replayed
+complete wait returns terminal + result; deferred_steps may still be listed
+stop     dsh_stop_goal  (no revision bump; goal_cancelled event)
+```
+
+Approval and question answers do **not** increment revision.
+
+### Execution modes
+
+| Mode | When | Behaviour |
+| --- | --- | --- |
+| `standard` | default, omitted | Current v0.2 agent instructions. Reasonable analysis/tests allowed. |
+| `minimal` | "only wait 35s", smoke, no extra work | Only actions strictly required. Default constraints: no workspace scan, `max_changed_files=0`. |
+| `strict` | user-supplied plan/constraints | Follow the plan/constraints; do not expand scope. |
+
+### Constraints (examples)
+
+```json
+{
+  "read_only": true,
+  "allow_workspace_scan": false,
+  "max_changed_files": 0,
+  "forbidden_actions": ["filesystem.scan", "filesystem.write"]
+}
+```
+
+Constraints can only **tighten** DSH sandbox/approval. `read_only=false` does not grant write. Runtime enforcement uses the approval waterfall (`toolName` + optional `callId` lookup of the logged `tool/call`) plus post-hoc fact checks. A bash command that never asks approval can only be caught after the fact.
+
+Action classes: `filesystem.read`, `filesystem.write`, `filesystem.scan`, `process.exec`, `git.mutate`, `npm.publish`, `github.release`, `network`.
+
+### Dependency-aware Goal (npm + GitHub Release)
+
+```text
+commit → verify → push → tag
+                         ├─ npm publish      (may defer on 2FA)
+                         └─ GitHub Release   (still runnable)
+```
+
+When npm hits 2FA: `dsh_update_goal({ action: "defer", defer_steps: ["npm_publish"] })`. GitHub Release continues on the same session. Later `action: "resume"` reactivates npm without retagging or repushing.
 
 ### Deliberately NOT exposed (first version)
 
@@ -292,8 +577,11 @@ before a process restart was still remembered afterwards).
   agent's file effects to that workspace.
 - **Localhost-first** — the HTTP server binds `127.0.0.1` by default.
 - **Secret redaction** — all bridge logs and tool outputs pass through a
-  redactor (sk-... keys, bearer tokens, key=value secrets, secret-shaped
-  keys). The generated token is never logged.
+  redactor (sk-... keys, bearer tokens, key=value secrets, OTP, secret-shaped
+  keys). Goal history never stores OTP, tokens, cookies, or Authorization
+  headers. The generated token is never logged.
+- **Goal constraints tighten only** — they never raise sandbox or approval
+  rights. OTP supplied for one exact operation is not persisted.
 - **No ChatGPT credentials** — the bridge never reads cookies, never drives a
   browser, never stores OpenAI session tokens.
 
@@ -337,12 +625,11 @@ semantics, not a second task system.
 
 ```bash
 npm run typecheck     # tsc --noEmit
-npm test              # node --test (status derivation, view extraction,
-                      #   redaction, workspace boundary, approvals/questions)
-npm run dogfood       # full MCP client flow against a running bridge:
-                      #   health -> workspaces -> create -> send -> status ->
-                      #   result -> follow-up -> same session continues,
-                      #   isolation, list/get, long-task cancel, redaction
+npm test              # node scripts/test.mjs — unit suite in one process;
+                      #   selects the test-isolation flag for the current
+                      #   Node (Node 22: experimental name; Node 23+: stable)
+npm run dogfood       # full MCP client flow against a running bridge
+npm run dogfood:goal  # v0.3.0 Goal Control Plane: minimal 35s + defer/resume DAG
 npm run resume-test   # create marker session -> restart the DSH profile ->
                       #   continue the same session -> marker survives
 npm run demo-flow     # two-step demo (analyze, then implement + test)
@@ -367,21 +654,6 @@ protocol ChatGPT speaks.
   the Web UI or any other entry point — DSH's session log is shared.
 
 DSH core modifications: **0**.
-
----
-
-## Common errors
-
-| Symptom | Cause / fix |
-| --- | --- |
-| `401 unauthorized` | Wrong/missing bearer token; read `$DSH_HOME/chatgpt-bridge.token` or set `DSH_CHATGPT_BRIDGE_TOKEN`. |
-| `WORKSPACE_NOT_FOUND` | The workspace is not registered in DSH; `dsh_list_workspaces` shows what is allowed. |
-| `SESSION_NOT_FOUND` | Unknown session id (never created, or persistence not mounted). |
-| `SESSION_NOT_LIVE` on cancel | The session is not loaded in this process; only live sessions can be cancelled. |
-| `APPROVAL_NOT_FOUND` / `QUESTION_NOT_FOUND` | The decision was already taken or the bridge restarted (parked decisions are in-memory). |
-| question provider slot taken (log) | A web UI is attached and owns user questions; answer them in the UI. |
-| Port 3456 busy | Another bridge instance is running; change `port`. |
-| Cold sessions show no title in `dsh_list_sessions` | Cold titles come from the projection cache; concurrent DSH profiles sharing the cache can clobber rows. Single-profile deployments get titles. |
 
 ---
 

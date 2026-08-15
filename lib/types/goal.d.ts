@@ -2,6 +2,11 @@
  * Thin Goal Supervision mapper. No Goal DB: maps existing DSH session
  * status (deriveStatus) into the start/wait/stop continuation protocol.
  */
+import type { ActionKind } from './goal-facts.js';
+import type { GoalHistoryEvent, GoalRecord, GoalSupervisionView } from './goal-control.js';
+import type { ExecutionMode, GoalConstraints } from './goal-constraints.js';
+import type { BlockedInfo, GoalGraph } from './goal-graph.js';
+import type { ProgressDelta } from './goal-delta.js';
 import type { BridgeStatus } from './status.js';
 export declare const DEFAULT_WAIT_SECONDS = 25;
 export declare const MIN_WAIT_SECONDS = 1;
@@ -11,14 +16,38 @@ export declare const REQUEST_ID_CAP = 256;
 export declare const GOAL_SUMMARY_MAX_CHARS = 4000;
 export declare const GOAL_FILES_MAX = 40;
 export declare const GOAL_TODOS_MAX = 40;
+export declare const OBSERVE_STATE_CAP = 256;
+/** Injected into every ChatGPT Bridge supervised Agent turn. Native get_goal is a different namespace. */
+export declare const SUPERVISED_GOAL_AUTHORITY: string;
 export declare function clampWaitSeconds(value: number | undefined): number;
-export declare function buildGoalMessage(goal: string, plan?: string): string;
+export interface GoalMessageOptions {
+    mode?: ExecutionMode;
+    constraints?: GoalConstraints;
+    completedKinds?: ActionKind[];
+    deferredSteps?: string[];
+    resumeSteps?: string[];
+    revision?: number;
+    intent?: 'start' | 'revise' | 'resume' | 'defer';
+}
+export declare function buildGoalMessage(goal: string, plan?: string, options?: GoalMessageOptions): string;
+/** Full Agent-turn payload: [Goal] banner + authority rules + goal/plan/mode. */
+export declare function buildSupervisedGoalContext(record: GoalRecord, goal: string, plan: string | undefined, intent: 'start' | 'revise' | 'resume' | 'defer', resumeSteps?: string[]): string;
+export interface ExecutionSupervisionView {
+    current_step?: string;
+    runnable_steps: string[];
+    blocked_steps: string[];
+    deferred_steps: string[];
+}
+export declare function executionView(graph: GoalGraph, currentStep?: string): ExecutionSupervisionView;
 export declare function titleFromGoal(goal: string): string;
 export declare function fingerprintStart(input: {
     workspace: string;
     goal: string;
     plan?: string;
     session_id?: string;
+    execution_mode?: string;
+    constraints?: unknown;
+    action?: string;
 }): string;
 /** Only these statuses keep the Goal wait loop alive. Never treat idle as running. */
 export declare function isActiveStatus(status: BridgeStatus): boolean;
@@ -58,6 +87,9 @@ export interface GoalStartResult {
     continuation_required: boolean;
     next_action: string;
     next_tool_call?: GoalToolCall;
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
 }
 export interface GoalWaitResult {
     session_id: string;
@@ -72,6 +104,15 @@ export interface GoalWaitResult {
     question?: unknown;
     next_action: string;
     next_tool_call?: GoalToolCall;
+    progress_delta?: ProgressDelta;
+    blocked?: BlockedInfo;
+    deferred_steps?: string[];
+    blocked_steps?: string[];
+    remaining_runnable_steps?: string[];
+    cleanup_warning?: string;
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
 }
 export interface GoalSnapshot {
     sessionId: string;
@@ -93,8 +134,23 @@ export interface GoalSnapshot {
     agentStatus?: 'idle' | 'running';
     approval?: unknown;
     question?: unknown;
+    progressDelta?: ProgressDelta;
+    blocked?: BlockedInfo;
+    deferredSteps?: string[];
+    blockedSteps?: string[];
+    remainingRunnableSteps?: string[];
+    cleanupWarning?: string;
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
 }
-export declare function mapStartGoal(sessionId: string, status: BridgeStatus, waitSeconds?: number): GoalStartResult;
+/** blocked is only a wait-loop terminal when no independent branch remains. */
+export declare function isWaitTerminal(status: BridgeStatus, remainingRunnableSteps?: string[]): boolean;
+export declare function mapStartGoal(sessionId: string, status: BridgeStatus, waitSeconds?: number, extras?: {
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
+}): GoalStartResult;
 export declare function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult;
 export interface GoalRequestRecord {
     sessionId: string;
@@ -107,4 +163,19 @@ export declare class RequestIdMap {
     constructor(cap?: number);
     get(requestId: string): GoalRequestRecord | undefined;
     set(requestId: string, record: GoalRequestRecord): void;
+}
+/** Per-session Goal observation (plan, deferrals). Not a Goal DB. */
+export interface GoalObserveState {
+    goalId: string;
+    goal: string;
+    plan?: string;
+    startedAt: number;
+    deferredKinds: ActionKind[];
+}
+export declare class GoalObserveMap {
+    private readonly items;
+    private readonly cap;
+    constructor(cap?: number);
+    get(sessionId: string): GoalObserveState | undefined;
+    set(sessionId: string, state: GoalObserveState): void;
 }

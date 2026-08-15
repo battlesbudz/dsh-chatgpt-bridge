@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import z from '@deepseek-ai/schemastery';
@@ -81,17 +81,12 @@ function readTokenFile(path: string): string | undefined {
 function createTokenFile(path: string): string {
   const token = randomBytes(24).toString('base64url');
   try {
-    mkdirSync(dirnameOf(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, token + '\n', { encoding: 'utf8', flag: 'w' });
   } catch {
     // persistence failure is not fatal: the token still works for this process
   }
   return token;
-}
-
-function dirnameOf(path: string): string {
-  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-  return index <= 0 ? '.' : path.slice(0, index);
 }
 
 export function defaultDshHome(env: Record<string, string | undefined>): string {

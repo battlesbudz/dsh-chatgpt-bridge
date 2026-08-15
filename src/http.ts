@@ -161,7 +161,13 @@ export function startHttpServer(
             }
           }
           sessions.clear();
-          await new Promise<void>((done) => httpServer.close(() => done()));
+          await new Promise<void>((done, fail) => {
+            httpServer.close((error) => {
+              if (error) fail(error);
+              else done();
+            });
+            httpServer.closeAllConnections();
+          });
         },
       });
     });

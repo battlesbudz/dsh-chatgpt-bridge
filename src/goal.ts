@@ -2,6 +2,13 @@
  * Thin Goal Supervision mapper. No Goal DB: maps existing DSH session
  * status (deriveStatus) into the start/wait/stop continuation protocol.
  */
+import type { ActionKind } from './goal-facts.js';
+import type { GoalHistoryEvent, GoalRecord, GoalSupervisionView } from './goal-control.js';
+import { revisionBanner } from './goal-control.js';
+import type { ExecutionMode, GoalConstraints } from './goal-constraints.js';
+import { parseExecutionMode } from './goal-constraints.js';
+import type { BlockedInfo, GoalGraph } from './goal-graph.js';
+import type { ProgressDelta } from './goal-delta.js';
 import type { BridgeStatus } from './status.js';
 
 export const DEFAULT_WAIT_SECONDS = 25;
@@ -12,14 +19,25 @@ export const REQUEST_ID_CAP = 256;
 export const GOAL_SUMMARY_MAX_CHARS = 4000;
 export const GOAL_FILES_MAX = 40;
 export const GOAL_TODOS_MAX = 40;
+export const OBSERVE_STATE_CAP = 256;
 
 const GOAL_MODE = [
   'Goal execution mode:',
   '- Treat the supplied goal as the completion target.',
-  '- Use DSH native todos to track progress.',
+  '- Use DSH native todos to track progress. After a real tool action succeeds, update the matching todo immediately.',
   '- Continue working through remaining todos without waiting for ChatGPT between ordinary engineering steps.',
+  '- If one independent branch is blocked, continue other runnable branches; do not freeze the whole goal.',
   '- Pause only for user questions, approvals, explicit errors, cancellation, or when the goal is complete.',
   '- Do not expand scope beyond the supplied goal.',
+].join('\n');
+
+/** Injected into every ChatGPT Bridge supervised Agent turn. Native get_goal is a different namespace. */
+export const SUPERVISED_GOAL_AUTHORITY = [
+  'This session is executing a ChatGPT Bridge supervised Goal.',
+  'The injected [Goal] block is the authoritative current Goal state,',
+  'including goal_id, revision, execution mode and constraints.',
+  'Do not call the agent-native get_goal tool to rediscover or validate this supervised Goal.',
+  'A null result from native get_goal does NOT mean the supervised Goal does not exist and must never override the injected Goal state.',
 ].join('\n');
 
 export function clampWaitSeconds(value: number | undefined): number {
@@ -30,11 +48,95 @@ export function clampWaitSeconds(value: number | undefined): number {
   return n;
 }
 
-export function buildGoalMessage(goal: string, plan?: string): string {
+export interface GoalMessageOptions {
+  mode?: ExecutionMode;
+  constraints?: GoalConstraints;
+  completedKinds?: ActionKind[];
+  deferredSteps?: string[];
+  resumeSteps?: string[];
+  revision?: number;
+  intent?: 'start' | 'revise' | 'resume' | 'defer';
+}
+
+export function buildGoalMessage(goal: string, plan?: string, options?: GoalMessageOptions): string {
   const lines = [`Goal:\n${goal.trim()}`];
   if (plan !== undefined && plan.trim() !== '') lines.push(`Plan:\n${plan.trim()}`);
+  if (options?.revision !== undefined) lines.push(`Goal revision: ${options.revision}`);
+  const mode = parseExecutionMode(options?.mode);
+  if (mode === 'minimal') {
+    lines.push([
+      'Execution mode: minimal',
+      '- Only perform actions that are strictly required to complete the goal.',
+      '- Do not scan the workspace, snapshot files, hash the tree, write extra reports, or run unsolicited verification.',
+      '- Do not call the agent-native get_goal tool; it is an unnecessary control-plane query in this mode.',
+      '- A null native get_goal result is not a missing Goal and must not change this supervised Goal.',
+    ].join('\n'));
+  } else if (mode === 'strict') {
+    lines.push([
+      'Execution mode: strict',
+      '- Follow the supplied plan and constraints exactly. Do not expand scope.',
+    ].join('\n'));
+  }
   lines.push(GOAL_MODE);
+  if (options?.constraints !== undefined && Object.keys(options.constraints).length > 0) {
+    lines.push(`Constraints (must not violate):\n${JSON.stringify(options.constraints)}`);
+  }
+  if (options?.completedKinds !== undefined && options.completedKinds.length > 0) {
+    lines.push(
+      'Already completed — do not repeat these destructive actions:\n'
+      + options.completedKinds.map((kind) => `- ${kind}`).join('\n'),
+    );
+  }
+  if (options?.deferredSteps !== undefined && options.deferredSteps.length > 0) {
+    lines.push('Deferred steps (do not run now):\n' + options.deferredSteps.map((step) => `- ${step}`).join('\n'));
+  }
+  if (options?.resumeSteps !== undefined && options.resumeSteps.length > 0) {
+    lines.push('Resume these steps now:\n' + options.resumeSteps.map((step) => `- ${step}`).join('\n'));
+  }
+  if (options?.intent === 'resume') {
+    lines.push('Resume the existing goal. Do not restart completed work.');
+  }
   return lines.join('\n\n');
+}
+
+/** Full Agent-turn payload: [Goal] banner + authority rules + goal/plan/mode. */
+export function buildSupervisedGoalContext(
+  record: GoalRecord,
+  goal: string,
+  plan: string | undefined,
+  intent: 'start' | 'revise' | 'resume' | 'defer',
+  resumeSteps?: string[],
+): string {
+  return [
+    revisionBanner(record),
+    SUPERVISED_GOAL_AUTHORITY,
+    `Supervised identity: goal_id=${record.goal_id} revision=${record.revision} mode=${record.mode}.`,
+    buildGoalMessage(goal, plan, {
+      mode: record.mode,
+      constraints: record.constraints,
+      completedKinds: record.completed_action_kinds,
+      deferredSteps: record.deferred_step_ids,
+      ...(resumeSteps === undefined || resumeSteps.length === 0 ? {} : { resumeSteps }),
+      revision: record.revision,
+      intent,
+    }),
+  ].join('\n\n');
+}
+
+export interface ExecutionSupervisionView {
+  current_step?: string;
+  runnable_steps: string[];
+  blocked_steps: string[];
+  deferred_steps: string[];
+}
+
+export function executionView(graph: GoalGraph, currentStep?: string): ExecutionSupervisionView {
+  return {
+    ...(currentStep === undefined || currentStep === '' ? {} : { current_step: currentStep }),
+    runnable_steps: [...graph.remaining_runnable_steps],
+    blocked_steps: [...graph.blocked_steps],
+    deferred_steps: [...graph.deferred_steps],
+  };
 }
 
 export function titleFromGoal(goal: string): string {
@@ -48,12 +150,18 @@ export function fingerprintStart(input: {
   goal: string;
   plan?: string;
   session_id?: string;
+  execution_mode?: string;
+  constraints?: unknown;
+  action?: string;
 }): string {
   return JSON.stringify({
     workspace: input.workspace,
     goal: input.goal,
     plan: input.plan ?? '',
     session_id: input.session_id ?? '',
+    execution_mode: input.execution_mode ?? '',
+    constraints: input.constraints ?? null,
+    action: input.action ?? '',
   });
 }
 
@@ -105,6 +213,9 @@ export interface GoalStartResult {
   continuation_required: boolean;
   next_action: string;
   next_tool_call?: GoalToolCall;
+  goal?: GoalSupervisionView;
+  execution?: ExecutionSupervisionView;
+  history?: GoalHistoryEvent[];
 }
 
 export interface GoalWaitResult {
@@ -120,6 +231,15 @@ export interface GoalWaitResult {
   question?: unknown;
   next_action: string;
   next_tool_call?: GoalToolCall;
+  progress_delta?: ProgressDelta;
+  blocked?: BlockedInfo;
+  deferred_steps?: string[];
+  blocked_steps?: string[];
+  remaining_runnable_steps?: string[];
+  cleanup_warning?: string;
+  goal?: GoalSupervisionView;
+  execution?: ExecutionSupervisionView;
+  history?: GoalHistoryEvent[];
 }
 
 export interface GoalSnapshot {
@@ -136,6 +256,15 @@ export interface GoalSnapshot {
   agentStatus?: 'idle' | 'running';
   approval?: unknown;
   question?: unknown;
+  progressDelta?: ProgressDelta;
+  blocked?: BlockedInfo;
+  deferredSteps?: string[];
+  blockedSteps?: string[];
+  remainingRunnableSteps?: string[];
+  cleanupWarning?: string;
+  goal?: GoalSupervisionView;
+  execution?: ExecutionSupervisionView;
+  history?: GoalHistoryEvent[];
 }
 
 function truncate(text: string, maxChars: number): string {
@@ -167,7 +296,49 @@ function progressOf(snapshot: GoalSnapshot): GoalProgress {
   };
 }
 
-export function mapStartGoal(sessionId: string, status: BridgeStatus, waitSeconds = DEFAULT_WAIT_SECONDS): GoalStartResult {
+function extrasOf(snapshot: GoalSnapshot): Partial<GoalWaitResult> {
+  return {
+    ...(snapshot.progressDelta === undefined ? {} : { progress_delta: snapshot.progressDelta }),
+    ...(snapshot.blocked === undefined ? {} : { blocked: snapshot.blocked }),
+    ...(snapshot.deferredSteps === undefined || snapshot.deferredSteps.length === 0
+      ? {}
+      : { deferred_steps: snapshot.deferredSteps }),
+    ...(snapshot.blockedSteps === undefined || snapshot.blockedSteps.length === 0
+      ? {}
+      : { blocked_steps: snapshot.blockedSteps }),
+    ...(snapshot.remainingRunnableSteps === undefined || snapshot.remainingRunnableSteps.length === 0
+      ? {}
+      : { remaining_runnable_steps: snapshot.remainingRunnableSteps }),
+    ...(snapshot.cleanupWarning === undefined || snapshot.cleanupWarning === ''
+      ? {}
+      : { cleanup_warning: snapshot.cleanupWarning }),
+    ...(snapshot.goal === undefined ? {} : { goal: snapshot.goal }),
+    ...(snapshot.execution === undefined ? {} : { execution: snapshot.execution }),
+    ...(snapshot.history === undefined || snapshot.history.length === 0 ? {} : { history: snapshot.history }),
+  };
+}
+
+/** blocked is only a wait-loop terminal when no independent branch remains. */
+export function isWaitTerminal(status: BridgeStatus, remainingRunnableSteps?: string[]): boolean {
+  if (status === 'blocked' && (remainingRunnableSteps?.length ?? 0) > 0) return false;
+  return isTerminalStatus(status);
+}
+
+export function mapStartGoal(
+  sessionId: string,
+  status: BridgeStatus,
+  waitSeconds = DEFAULT_WAIT_SECONDS,
+  extras?: {
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
+  },
+): GoalStartResult {
+  const extraFields = {
+    ...(extras?.goal === undefined ? {} : { goal: extras.goal }),
+    ...(extras?.execution === undefined ? {} : { execution: extras.execution }),
+    ...(extras?.history === undefined || extras.history.length === 0 ? {} : { history: extras.history }),
+  };
   const active = isActiveStatus(status);
   if (active) {
     return {
@@ -179,6 +350,7 @@ export function mapStartGoal(sessionId: string, status: BridgeStatus, waitSecond
         name: 'dsh_wait_goal',
         arguments: { session_id: sessionId, wait_seconds: waitSeconds },
       },
+      ...extraFields,
     };
   }
   if (isWaitingStatus(status)) {
@@ -189,6 +361,7 @@ export function mapStartGoal(sessionId: string, status: BridgeStatus, waitSecond
       next_action: status === 'waiting_for_approval'
         ? 'DSH is waiting for an explicit approval. Ask the user, then call dsh_approve, then dsh_wait_goal.'
         : 'DSH is waiting for the user. Ask the user, then call dsh_answer_question, then dsh_wait_goal.',
+      ...extraFields,
     };
   }
   return {
@@ -198,11 +371,13 @@ export function mapStartGoal(sessionId: string, status: BridgeStatus, waitSecond
     next_action: isTerminalStatus(status)
       ? 'The DSH goal is already terminal. Inspect the session or start a new goal.'
       : 'The DSH session is idle. Send a goal or message before waiting.',
+    ...extraFields,
   };
 }
 
 export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
   const { sessionId, status, waitedMs, waitSeconds } = snapshot;
+  const extras = extrasOf(snapshot);
   if (isActiveStatus(status)) {
     return {
       session_id: sessionId,
@@ -216,6 +391,7 @@ export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
         name: 'dsh_wait_goal',
         arguments: { session_id: sessionId, wait_seconds: waitSeconds },
       },
+      ...extras,
     };
   }
   if (status === 'waiting_for_approval') {
@@ -229,6 +405,7 @@ export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
       ...(snapshot.approval === undefined ? {} : { approval: snapshot.approval }),
       progress: progressOf(snapshot),
       next_action: 'DSH is waiting for approval. Ask the user, then call dsh_approve with the exact approval_id, then call dsh_wait_goal. Do not auto-approve.',
+      ...extras,
     };
   }
   if (status === 'waiting_for_user') {
@@ -242,6 +419,21 @@ export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
       ...(snapshot.question === undefined ? {} : { question: snapshot.question }),
       progress: progressOf(snapshot),
       next_action: 'DSH is waiting for the user. Ask the user, then call dsh_answer_question, then call dsh_wait_goal. Do not guess the answer.',
+      ...extras,
+    };
+  }
+  if (status === 'blocked' && !isWaitTerminal(status, snapshot.remainingRunnableSteps)) {
+    return {
+      session_id: sessionId,
+      status,
+      terminal: false,
+      waited_ms: waitedMs,
+      continuation_required: false,
+      progress: progressOf(snapshot),
+      next_action:
+        'One Goal branch is blocked but independent steps remain. Re-arm with dsh_start_goal on this session_id '
+        + '(defer the blocked step if needed) to continue remaining_runnable_steps. Do not treat the whole Goal as finished.',
+      ...extras,
     };
   }
   if (isTerminalStatus(status)) {
@@ -262,6 +454,7 @@ export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
       next_action: status === 'completed'
         ? 'The DSH goal is complete. Review the returned result.'
         : `The DSH goal ended (${status}). Review the returned result; do not keep calling dsh_wait_goal.`,
+      ...extras,
     };
   }
   return {
@@ -272,6 +465,7 @@ export function mapWaitGoal(snapshot: GoalSnapshot): GoalWaitResult {
     continuation_required: false,
     progress: progressOf(snapshot),
     next_action: 'The DSH session is idle. Do not loop dsh_wait_goal; send a new goal or message if more work is needed.',
+    ...extras,
   };
 }
 
@@ -295,6 +489,37 @@ export class RequestIdMap {
   set(requestId: string, record: GoalRequestRecord): void {
     if (this.items.has(requestId)) this.items.delete(requestId);
     this.items.set(requestId, record);
+    while (this.items.size > this.cap) {
+      const first = this.items.keys().next().value;
+      if (first === undefined) break;
+      this.items.delete(first);
+    }
+  }
+}
+
+/** Per-session Goal observation (plan, deferrals). Not a Goal DB. */
+export interface GoalObserveState {
+  goalId: string;
+  goal: string;
+  plan?: string;
+  startedAt: number;
+  deferredKinds: ActionKind[];
+}
+
+export class GoalObserveMap {
+  private readonly items = new Map<string, GoalObserveState>();
+  private readonly cap: number;
+  constructor(cap = OBSERVE_STATE_CAP) {
+    this.cap = cap;
+  }
+
+  get(sessionId: string): GoalObserveState | undefined {
+    return this.items.get(sessionId);
+  }
+
+  set(sessionId: string, state: GoalObserveState): void {
+    if (this.items.has(sessionId)) this.items.delete(sessionId);
+    this.items.set(sessionId, state);
     while (this.items.size > this.cap) {
       const first = this.items.keys().next().value;
       if (first === undefined) break;

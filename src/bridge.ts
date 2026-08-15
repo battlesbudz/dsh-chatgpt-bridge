@@ -35,7 +35,6 @@ import {
   assistantTextForTurn,
   changedFilesForTurn,
   lastEventTime,
-  lastTodos,
   lastTurnSpan,
   summarizeMessages,
   toolCallsForTurn,
@@ -43,19 +42,56 @@ import {
   type ToolCallInfo,
 } from './session-view.js';
 import {
+  DEFAULT_WAIT_SECONDS,
   RequestIdMap,
   WAIT_POLL_MS,
-  buildGoalMessage,
+  buildSupervisedGoalContext,
   clampWaitSeconds,
+  executionView,
   fingerprintStart,
   isActiveStatus,
   isTerminalStatus,
   mapStartGoal,
   mapWaitGoal,
   titleFromGoal,
+  type ExecutionSupervisionView,
   type GoalStartResult,
   type GoalWaitResult,
 } from './goal.js';
+import { extractCommand, extractFilePath, foldGoalFacts, parseArgsJson, successfulKinds, type ActionKind } from './goal-facts.js';
+import { reconcileTodos } from './goal-reconcile.js';
+import {
+  buildGoalGraph,
+  describeBlocked,
+  detectDeferredKinds,
+  inferBlockedKind,
+  resolveStepRefs,
+  type BlockedInfo,
+} from './goal-graph.js';
+import { PollCursorMap, computeProgressDelta, nextPollCursor } from './goal-delta.js';
+import { cleanupTempResources, discoverTempResources } from './temp-resources.js';
+import {
+  GoalControlStore,
+  appendGoalEvent,
+  applyNativeGetGoalResult,
+  applyRevision,
+  createGoalRecord,
+  fileStoreIo,
+  goalControlDir,
+  sliceHistory,
+  supervisionGoal,
+  type GoalHistoryEvent,
+  type GoalRecord,
+  type GoalSupervisionView,
+} from './goal-control.js';
+import {
+  evaluateConstraint,
+  findConstraintViolation,
+  parseConstraints,
+  parseExecutionMode,
+  type ExecutionMode,
+  type GoalConstraints,
+} from './goal-constraints.js';
 import {
   asApiProxy,
   cancelQuestion,
@@ -66,6 +102,9 @@ import {
   type ApiProxyLike,
 } from './web-gateway.js';
 import { BRIDGE_NAME, BRIDGE_VERSION } from './version.js';
+import { pathsEqual } from './paths.js';
+
+export { normalizePath } from './paths.js';
 
 /** Typed bridge error with a stable machine-readable code. */
 export class BridgeError extends Error {
@@ -161,6 +200,13 @@ export interface SessionView {
   messages: MessageRow[];
   last_turn?: { turn: number; reason?: string };
   todos?: { content: string; status: string }[];
+  blocked?: BlockedInfo;
+  deferred_steps?: string[];
+  blocked_steps?: string[];
+  remaining_runnable_steps?: string[];
+  goal?: GoalSupervisionView;
+  execution?: ExecutionSupervisionView;
+  history?: GoalHistoryEvent[];
 }
 
 export interface SessionSummary {
@@ -211,12 +257,6 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/** Normalize a path for comparison (case-insensitive on win32). */
-export function normalizePath(path: string): string {
-  const normalized = path.replace(/[\/]+$/, '');
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-}
-
 /** The bridge service. One instance per plugin activation. */
 export class Bridge {
   private readonly ctx: Context;
@@ -231,8 +271,11 @@ export class Bridge {
   private questionsEnabled = false;
   private started = false;
   private readonly goalRequests = new RequestIdMap();
+  private readonly goalStore: GoalControlStore;
+  private readonly pollCursors = new PollCursorMap();
   private apiProxy: ApiProxyLike | undefined;
   private muxAbort: AbortController | undefined;
+  private webOwnsApprovals = false;
   /** Test hooks for bounded wait loops. */
   now: () => number = () => Date.now();
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -241,6 +284,10 @@ export class Bridge {
     this.ctx = ctx;
     this.cfg = cfg;
     this.log = log;
+    const home = typeof cfg.dshHome === 'string' && cfg.dshHome !== '' ? cfg.dshHome : undefined;
+    this.goalStore = new GoalControlStore(
+      home === undefined ? undefined : fileStoreIo(goalControlDir(home)),
+    );
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -257,6 +304,7 @@ export class Bridge {
     if (this.apiProxy !== undefined || webGatewayPending) {
       // Same process as DSH Web: observe mux, settle through respond(). Do not
       // steal the single userQuestions slot or the approval waterfall.
+      this.webOwnsApprovals = true;
       this.approvalsEnabled = true;
       this.questionsEnabled = true;
       const attachMux = (api: ApiProxyLike): void => {
@@ -302,41 +350,14 @@ export class Bridge {
       if (this.apiProxy !== undefined) {
         attachMux(this.apiProxy);
       } else {
-        (this.ctx as unknown as { inject(deps: string[], cb: () => void): void }).inject(['apiProxy'], () => {
+        this.ctx.inject(['apiProxy'], () => {
           const api = asApiProxy(this.ctx.get('apiProxy'));
           if (api !== undefined) attachMux(api);
         });
       }
     } else {
       // Headless: this process owns the answerer seams.
-      this.ctx.on('approval/request', (request, next) => {
-        if (!this.managed.has(request.agent.id)) return next();
-        const id = `approval-${randomUUID()}`;
-        const pending: PendingApproval = {
-          id,
-          sessionId: request.agent.id,
-          toolName: request.toolName,
-          callId: request.callId,
-          reason: request.reason,
-          resolve: () => {},
-        };
-        const decision = new Promise<ApprovalOutcome>((resolve) => {
-          pending.resolve = resolve;
-        });
-        this.approvals.set(id, pending);
-        this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName})`);
-        request.signal?.addEventListener(
-          'abort',
-          () => {
-            if (this.approvals.delete(id)) {
-              this.log.info(`approval ${id} withdrawn (turn aborted)`);
-              pending.resolve('cancelled');
-            }
-          },
-          { once: true },
-        );
-        return decision;
-      });
+      this.webOwnsApprovals = false;
       this.approvalsEnabled = true;
 
       const userQuestions = this.ctx.get('userQuestions');
@@ -360,7 +381,41 @@ export class Bridge {
       }
     }
 
-    (this.ctx as unknown as { on(event: string, cb: () => void): void }).on('dispose', () => {
+    this.ctx.on('approval/request', (request, next) => {
+      if (!this.managed.has(request.agent.id)) return next();
+      if (this.rejectConstraint(request)) return Promise.resolve('rejected' as ApprovalOutcome);
+      if (this.webOwnsApprovals) return next();
+      const id = `approval-${randomUUID()}`;
+      const pending: PendingApproval = {
+        id,
+        sessionId: request.agent.id,
+        toolName: request.toolName,
+        callId: request.callId,
+        reason: request.reason,
+        resolve: () => {},
+      };
+      const decision = new Promise<ApprovalOutcome>((resolve) => {
+        pending.resolve = resolve;
+      });
+      this.approvals.set(id, pending);
+      this.noteGoalEvent(request.agent.id, 'approval_requested', {
+        metadata: { tool: request.toolName, approval_id: id },
+      });
+      this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName})`);
+      request.signal?.addEventListener(
+        'abort',
+        () => {
+          if (this.approvals.delete(id)) {
+            this.log.info(`approval ${id} withdrawn (turn aborted)`);
+            pending.resolve('cancelled');
+          }
+        },
+        { once: true },
+      );
+      return decision;
+    });
+
+    this.ctx.effect(() => () => {
       this.muxAbort?.abort();
       for (const pending of [...this.approvals.values()]) {
         this.approvals.delete(pending.id);
@@ -519,8 +574,7 @@ export class Bridge {
     const all = registry.list();
     const byId = all.find((workspace) => workspace.id === input);
     if (byId !== undefined) return byId;
-    const normalized = normalizePath(input);
-    const byPath = all.find((workspace) => normalizePath(workspace.path) === normalized);
+    const byPath = all.find((workspace) => pathsEqual(workspace.path, input));
     if (byPath !== undefined) return byPath;
     const byTitle = all.find((workspace) => workspace.title === input);
     if (byTitle !== undefined) return byTitle;
@@ -753,7 +807,7 @@ export class Bridge {
       waiting,
       messages: summarizeMessages(view.events, items, chars),
       ...(span === undefined ? {} : { last_turn: { turn: span.turn, ...(span.reason === undefined ? {} : { reason: span.reason.kind }) } }),
-      ...(lastTodos(view.events) === undefined ? {} : { todos: lastTodos(view.events) as { content: string; status: string }[] }),
+      ...this.goalFields(sessionId, view, status),
     };
   }
 
@@ -767,8 +821,7 @@ export class Bridge {
     let rows = [...byId.values()];
     if (options.workspace !== undefined && options.workspace !== '') {
       const workspace = await this.resolveWorkspace(options.workspace);
-      const normalized = normalizePath(workspace.path);
-      rows = rows.filter((header) => header.cwd !== undefined && normalizePath(header.cwd as string) === normalized);
+      rows = rows.filter((header) => header.cwd !== undefined && pathsEqual(header.cwd, workspace.path));
     }
     rows.sort((a, b) => b.createdAt - a.createdAt);
     const offset = Math.max(options.offset ?? 0, 0);
@@ -859,6 +912,14 @@ export class Bridge {
     waiting: WaitingState;
     last_turn?: { turn: number; reason?: string };
     updated_at?: string;
+    todos?: { content: string; status: string }[];
+    blocked?: BlockedInfo;
+    deferred_steps?: string[];
+    blocked_steps?: string[];
+    remaining_runnable_steps?: string[];
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
   }> {
     const view = await this.loadView(sessionId);
     const status = await this.statusOf(sessionId, view);
@@ -875,6 +936,7 @@ export class Bridge {
       waiting: this.waitingFor(sessionId, view.events),
       ...(span === undefined ? {} : { last_turn: { turn: span.turn, ...(span.reason === undefined ? {} : { reason: span.reason.kind }) } }),
       updated_at: lastEventTime(view.events),
+      ...this.goalFields(sessionId, view, status),
     };
   }
 
@@ -886,6 +948,8 @@ export class Bridge {
     plan?: string;
     session_id?: string;
     request_id?: string;
+    execution_mode?: ExecutionMode;
+    constraints?: GoalConstraints;
   }): Promise<GoalStartResult> {
     if (input.goal.trim() === '') throw new BridgeError('EMPTY_GOAL', 'goal must not be empty');
     const fingerprint = fingerprintStart(input);
@@ -900,7 +964,7 @@ export class Bridge {
         }
         this.adopt(existing.sessionId);
         const view = await this.loadView(existing.sessionId);
-        return mapStartGoal(existing.sessionId, await this.statusOf(existing.sessionId, view));
+        return this.mapGoalStart(existing.sessionId, view);
       }
     }
     let sessionId = input.session_id;
@@ -911,12 +975,112 @@ export class Bridge {
       await this.resolveWorkspace(input.workspace);
       this.adopt(sessionId);
     }
-    await this.sendMessage(sessionId, buildGoalMessage(input.goal, input.plan));
+    const record = this.applyStartOrRevise(sessionId, input);
+    await this.sendMessage(sessionId, this.controlMessage(record, input.goal, input.plan, record.revision === 1 ? 'start' : 'revise'));
     if (input.request_id !== undefined && input.request_id !== '') {
       this.goalRequests.set(input.request_id, { sessionId, fingerprint });
     }
     const view = await this.loadView(sessionId);
-    return mapStartGoal(sessionId, await this.statusOf(sessionId, view));
+    return this.mapGoalStart(sessionId, view);
+  }
+
+  async updateGoal(input: {
+    session_id: string;
+    action?: 'revise' | 'defer' | 'resume';
+    goal?: string;
+    plan?: string;
+    execution_mode?: ExecutionMode;
+    constraints?: GoalConstraints;
+    defer_steps?: string[];
+    resume_steps?: string[];
+    revision_reason?: string;
+    request_id?: string;
+    workspace?: string;
+  }): Promise<GoalStartResult> {
+    const sessionId = input.session_id;
+    if (sessionId.trim() === '') throw new BridgeError('SESSION_REQUIRED', 'dsh_update_goal requires session_id');
+    const action = input.action ?? 'revise';
+    const fingerprint = fingerprintStart({
+      workspace: input.workspace ?? '',
+      goal: input.goal ?? '',
+      plan: input.plan,
+      session_id: sessionId,
+      execution_mode: input.execution_mode,
+      constraints: input.constraints,
+      action,
+    });
+    if (input.request_id !== undefined && input.request_id !== '') {
+      const existing = this.goalRequests.get(input.request_id);
+      if (existing !== undefined) {
+        if (existing.fingerprint !== fingerprint) {
+          throw new BridgeError(
+            'REQUEST_ID_CONFLICT',
+            `request_id "${input.request_id}" was already used with different update_goal arguments`,
+          );
+        }
+        this.adopt(existing.sessionId);
+        const view = await this.loadView(existing.sessionId);
+        return this.mapGoalStart(existing.sessionId, view);
+      }
+    }
+    this.adopt(sessionId);
+    await this.ensureAgent(sessionId);
+    const current = this.goalStore.get(sessionId);
+    if (action === 'resume' && current === undefined) {
+      throw new BridgeError('GOAL_NOT_FOUND', `no supervised goal on session ${sessionId}; resume will not create one`);
+    }
+    const viewBefore = await this.loadView(sessionId);
+    const observed = this.observeGoal(sessionId, viewBefore, await this.statusOf(sessionId, viewBefore));
+    const resolvedDefer = input.defer_steps === undefined
+      ? { ids: [] as string[], kinds: [] as ActionKind[] }
+      : resolveStepRefs(input.defer_steps, observed.graph.steps);
+    const resolvedResume = input.resume_steps === undefined
+      ? { ids: action === 'resume' ? [...(current?.deferred_step_ids ?? [])] : [], kinds: [] as ActionKind[] }
+      : resolveStepRefs(input.resume_steps, observed.graph.steps);
+    const detected = detectDeferredKinds(input.goal ?? current?.goal ?? '', input.plan ?? current?.plan);
+    const deferIds = uniqueStrings([
+      ...resolvedDefer.ids,
+      ...resolvedDefer.kinds,
+      ...detected,
+      ...(action === 'defer' ? (input.defer_steps ?? []) : []),
+    ]);
+    const resumeIds = uniqueStrings([...resolvedResume.ids, ...resolvedResume.kinds]);
+    let record = current ?? createGoalRecord({
+      sessionId,
+      goal: input.goal ?? 'continued goal',
+      plan: input.plan,
+      mode: parseExecutionMode(input.execution_mode),
+      constraints: parseConstraints(input.constraints),
+      now: this.now(),
+    });
+    if (current === undefined) this.goalStore.put(record);
+    record = applyRevision(record, {
+      ...(input.goal === undefined ? {} : { goal: input.goal }),
+      ...(input.plan === undefined ? {} : { plan: input.plan }),
+      ...(input.execution_mode === undefined ? {} : { mode: parseExecutionMode(input.execution_mode) }),
+      ...(input.constraints === undefined ? {} : { constraints: parseConstraints(input.constraints) }),
+      ...(deferIds.length === 0 ? {} : { deferredStepIds: deferIds }),
+      ...(action === 'resume' ? { resumeStepIds: resumeIds } : {}),
+      completedActionKinds: [...successfulKinds(observed.facts)],
+      revisionReason: input.revision_reason ?? (
+        action === 'resume' ? 'user_resumed_goal' : action === 'defer' ? 'user_deferred_step' : 'user_modified_goal'
+      ),
+      now: this.now(),
+    }, action === 'resume' ? 'goal_resumed' : 'goal_revised');
+    this.goalStore.put(record);
+    const intent = action === 'resume' ? 'resume' : action === 'defer' ? 'defer' : 'revise';
+    await this.sendMessage(sessionId, this.controlMessage(
+      record,
+      input.goal ?? record.goal,
+      input.plan ?? record.plan,
+      intent,
+      resumeIds,
+    ));
+    if (input.request_id !== undefined && input.request_id !== '') {
+      this.goalRequests.set(input.request_id, { sessionId, fingerprint });
+    }
+    const view = await this.loadView(sessionId);
+    return this.mapGoalStart(sessionId, view);
   }
 
   async waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult> {
@@ -941,20 +1105,43 @@ export class Bridge {
     stopped: true;
     already_stopped: boolean;
     status: BridgeStatus;
+    cleanup_warning?: string;
   }> {
     this.adopt(sessionId);
     const view = await this.loadView(sessionId);
     const status = await this.statusOf(sessionId, view);
     if (isTerminalStatus(status) || status === 'unknown' || (status === 'idle' && view.agent === undefined)) {
-      return { session_id: sessionId, stopped: true, already_stopped: true, status };
+      const warning = this.cleanupGoalTemps(sessionId, view);
+      return {
+        session_id: sessionId,
+        stopped: true,
+        already_stopped: true,
+        status,
+        ...(warning === undefined ? {} : { cleanup_warning: warning }),
+      };
     }
     if (status === 'idle' && view.agent !== undefined && !isActiveStatus(status)) {
-      return { session_id: sessionId, stopped: true, already_stopped: true, status };
+      const warning = this.cleanupGoalTemps(sessionId, view);
+      return {
+        session_id: sessionId,
+        stopped: true,
+        already_stopped: true,
+        status,
+        ...(warning === undefined ? {} : { cleanup_warning: warning }),
+      };
     }
     await this.failClosedWaiting(sessionId);
     const agent = this.ctx.agents.get(SessionId(sessionId));
     if (agent !== undefined) agent.cancel({ kind: 'user' });
-    return { session_id: sessionId, stopped: true, already_stopped: false, status: 'cancelled' };
+    const warning = this.cleanupGoalTemps(sessionId, view);
+    this.noteGoalEvent(sessionId, 'goal_cancelled');
+    return {
+      session_id: sessionId,
+      stopped: true,
+      already_stopped: false,
+      status: 'cancelled',
+      ...(warning === undefined ? {} : { cleanup_warning: warning }),
+    };
   }
 
   private async failClosedWaiting(sessionId: string): Promise<void> {
@@ -978,6 +1165,208 @@ export class Bridge {
     }
   }
 
+  private applyStartOrRevise(sessionId: string, input: {
+    goal: string;
+    plan?: string;
+    execution_mode?: ExecutionMode;
+    constraints?: GoalConstraints;
+  }): GoalRecord {
+    const existing = this.goalStore.get(sessionId);
+    const mode = parseExecutionMode(input.execution_mode);
+    const constraints = parseConstraints(input.constraints);
+    const detected = detectDeferredKinds(input.goal, input.plan);
+    if (existing === undefined) {
+      const created = createGoalRecord({
+        sessionId,
+        goal: input.goal,
+        plan: input.plan,
+        mode,
+        constraints,
+        now: this.now(),
+        revisionReason: 'goal_created',
+      });
+      if (detected.length > 0) created.deferred_step_ids = [...new Set(detected)];
+      return this.goalStore.put(created);
+    }
+    return this.goalStore.put(applyRevision(existing, {
+      goal: input.goal,
+      plan: input.plan,
+      mode,
+      constraints,
+      deferredStepIds: detected,
+      revisionReason: 'user_modified_goal',
+      now: this.now(),
+    }, 'goal_revised'));
+  }
+
+  private controlMessage(
+    record: GoalRecord,
+    goal: string,
+    plan: string | undefined,
+    intent: 'start' | 'revise' | 'resume' | 'defer',
+    resumeSteps?: string[],
+  ): string {
+    return buildSupervisedGoalContext(record, goal, plan, intent, resumeSteps);
+  }
+
+  private async mapGoalStart(sessionId: string, view: LoadedView): Promise<GoalStartResult> {
+    const status = await this.statusOf(sessionId, view);
+    const observed = this.observeGoal(sessionId, view, status);
+    const record = applyNativeGetGoalResult(this.goalStore.get(sessionId), undefined);
+    const currentStep = observed.blocked?.step
+      ?? observed.graph.steps.find((step) => step.status === 'in_progress' || step.status === 'ready')?.content
+      ?? observed.graph.remaining_runnable_steps[0];
+    return mapStartGoal(sessionId, status, DEFAULT_WAIT_SECONDS, {
+      ...(record === undefined ? {} : { goal: supervisionGoal(record) }),
+      execution: executionView(observed.graph, currentStep),
+      ...(record === undefined ? {} : { history: sliceHistory(record.history) }),
+    });
+  }
+
+  private noteGoalEvent(
+    sessionId: string,
+    type: GoalHistoryEvent['type'],
+    extra?: { step_id?: string; metadata?: Record<string, unknown> },
+  ): void {
+    const record = this.goalStore.get(sessionId);
+    if (record === undefined) return;
+    this.goalStore.put(appendGoalEvent(record, type, { ...extra, now: this.now() }));
+  }
+
+  private rejectConstraint(request: {
+    agent: { id: string; session?: { events: readonly { type: string; data?: unknown }[] } };
+    toolName: string;
+    callId?: string;
+  }): boolean {
+    const record = this.goalStore.get(request.agent.id);
+    if (record === undefined) return false;
+    const hasRules = Object.keys(record.constraints).length > 0 || record.completed_action_kinds.length > 0;
+    if (!hasRules) return false;
+    const command = commandForCall(request.agent.session?.events, request.callId);
+    const changed = changedFileCountOf(request.agent.session?.events);
+    const decision = evaluateConstraint({
+      constraints: record.constraints,
+      completedKinds: record.completed_action_kinds,
+      changedFileCount: changed,
+      toolName: request.toolName,
+      command,
+    });
+    if (decision.allow) return false;
+    this.goalStore.put(appendGoalEvent(record, 'constraint_rejected', {
+      now: this.now(),
+      ...(decision.kind === undefined ? {} : { step_id: decision.kind }),
+      metadata: {
+        reason: decision.reason,
+        tool: request.toolName,
+        ...(decision.action_class === undefined ? {} : { action_class: decision.action_class }),
+      },
+    }));
+    this.log.info(`constraint rejected ${request.toolName} on ${request.agent.id}: ${decision.reason}`);
+    return true;
+  }
+
+  private observeGoal(sessionId: string, view: LoadedView, status: BridgeStatus) {
+    const facts = foldGoalFacts(view.events);
+    let record = this.goalStore.get(sessionId);
+    const succeeded = [...successfulKinds(facts)];
+    if (record !== undefined && succeeded.some((kind) => !record!.completed_action_kinds.includes(kind))) {
+      record = {
+        ...record,
+        completed_action_kinds: [...new Set([...record.completed_action_kinds, ...succeeded])],
+      };
+      this.goalStore.put(record);
+    }
+    const isHeld = status === 'waiting_for_approval' || status === 'waiting_for_user' || status === 'blocked';
+    const waitingKinds = isHeld
+      ? (() => {
+          const kind = inferBlockedKind(facts, status);
+          return kind === undefined ? [] : [kind];
+        })()
+      : [];
+    const todos = reconcileTodos({
+      ...(facts.todos === undefined ? {} : { todos: facts.todos }),
+      facts,
+      waitingKinds,
+      holdInProgress: isHeld,
+    });
+    const blockedKind = inferBlockedKind(facts, status);
+    const deferredKinds = deferredKindsOf(record);
+    const graph = buildGoalGraph({
+      ...(todos === undefined ? {} : { todos }),
+      ...(record?.plan === undefined ? {} : { plan: record.plan }),
+      facts,
+      deferredKinds,
+      ...(record === undefined ? {} : { deferredStepIds: record.deferred_step_ids }),
+      ...(blockedKind === undefined ? {} : { blockedKind }),
+      ...(status === 'waiting_for_user' || status === 'waiting_for_approval' ? { waitingStatus: status } : {}),
+    });
+    const waiting = this.waitingFor(sessionId, view.events);
+    let blocked = describeBlocked({
+      status,
+      facts,
+      graph,
+      approval: waiting.approvals[0],
+      question: waiting.questions[0],
+    });
+    if (record !== undefined) {
+      const violation = findPostHocViolation(facts, record);
+      if (violation !== undefined) {
+        blocked = {
+          step: violation.step,
+          reason: 'constraint_rejected',
+          resume_condition: `Constraint ${violation.reason} rejected this action. Revise constraints or the goal, then resume.`,
+          scope: graph.remaining_runnable_steps.length > 0 ? 'step' : 'goal',
+          independent_steps_available: graph.remaining_runnable_steps.length > 0,
+        };
+      }
+    }
+    return { facts, todos, graph, blocked, waiting, record };
+  }
+
+  private goalFields(sessionId: string, view: LoadedView, status: BridgeStatus): {
+    todos?: { content: string; status: string }[];
+    blocked?: BlockedInfo;
+    deferred_steps?: string[];
+    blocked_steps?: string[];
+    remaining_runnable_steps?: string[];
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
+  } {
+    const { todos, graph, blocked, record: observedRecord } = this.observeGoal(sessionId, view, status);
+    const record = applyNativeGetGoalResult(observedRecord, undefined);
+    const currentStep = blocked?.step
+      ?? graph.steps.find((step) => step.status === 'in_progress' || step.status === 'ready')?.content
+      ?? graph.remaining_runnable_steps[0];
+    return {
+      ...(todos === undefined ? {} : { todos }),
+      ...(blocked === undefined ? {} : { blocked }),
+      ...(graph.deferred_steps.length === 0 ? {} : { deferred_steps: graph.deferred_steps }),
+      ...(graph.blocked_steps.length === 0 ? {} : { blocked_steps: graph.blocked_steps }),
+      ...(graph.remaining_runnable_steps.length === 0 ? {} : { remaining_runnable_steps: graph.remaining_runnable_steps }),
+      ...(record === undefined ? {} : { goal: supervisionGoal(record) }),
+      execution: executionView(graph, currentStep),
+      ...(record === undefined ? {} : { history: sliceHistory(record.history) }),
+    };
+  }
+
+  private cleanupGoalTemps(sessionId: string, view: LoadedView): string | undefined {
+    const workspace = view.header.cwd;
+    if (typeof workspace !== 'string' || workspace === '') return undefined;
+    const facts = foldGoalFacts(view.events);
+    const record = this.goalStore.get(sessionId);
+    const resources = discoverTempResources({
+      facts,
+      sessionId,
+      goalId: record?.goal_id ?? sessionId,
+      workspacePath: workspace,
+    });
+    if (resources.length === 0) return undefined;
+    const cleaned = cleanupTempResources(resources, workspace);
+    if (cleaned.warnings.length === 0) return undefined;
+    return cleaned.warnings.join('; ');
+  }
+
   private async goalSnapshot(
     sessionId: string,
     view: LoadedView,
@@ -985,13 +1374,33 @@ export class Bridge {
     waitedMs: number,
     waitSeconds: number,
   ): Promise<GoalWaitResult> {
-    const waiting = this.waitingFor(sessionId, view.events);
+    const { facts, todos, graph, blocked, waiting, record: observedRecord } = this.observeGoal(sessionId, view, status);
+    const record = applyNativeGetGoalResult(observedRecord, undefined);
     const span = lastTurnSpan(view.events);
-    const todos = lastTodos(view.events);
+    const changedFiles = span === undefined ? [] : changedFilesForTurn(view.events, span.turn);
     const errorSummary = span?.reason !== undefined && span.reason.kind === 'error'
       ? `${span.reason.error.code}: ${span.reason.error.message}`
       : undefined;
-    return mapWaitGoal({
+    const currentStep = blocked?.step
+      ?? graph.steps.find((step) => step.status === 'in_progress')?.content
+      ?? graph.remaining_runnable_steps[0];
+    const approvalIds = waiting.approvals.map((item) => item.approval_id);
+    const questionIds = waiting.questions.map((item) => item.question_id);
+    const deltaInput = {
+      events: view.events,
+      facts,
+      ...(todos === undefined ? {} : { todos }),
+      status,
+      changedFiles,
+      ...(view.agent === undefined ? {} : { agentStatus: view.agent.status }),
+      approvalIds,
+      questionIds,
+      previous: this.pollCursors.get(sessionId),
+      ...(currentStep === undefined ? {} : { currentStep }),
+    };
+    const progressDelta = computeProgressDelta(deltaInput);
+    this.pollCursors.set(sessionId, nextPollCursor(deltaInput));
+    const mapped = mapWaitGoal({
       sessionId,
       status,
       waitedMs,
@@ -999,13 +1408,30 @@ export class Bridge {
       ...(todos === undefined ? {} : { todos }),
       lastActivity: lastEventTime(view.events),
       ...(span === undefined ? {} : { lastTurn: { turn: span.turn, ...(span.reason === undefined ? {} : { reason: span.reason.kind }) } }),
-      changedFiles: span === undefined ? [] : changedFilesForTurn(view.events, span.turn),
+      changedFiles,
       assistantSummary: span === undefined ? '' : assistantTextForTurn(view.events, span.turn),
       ...(errorSummary === undefined ? {} : { errorSummary }),
       ...(view.agent === undefined ? {} : { agentStatus: view.agent.status }),
       approval: waiting.approvals[0],
       question: waiting.questions[0],
+      progressDelta,
+      ...(blocked === undefined ? {} : { blocked }),
+      deferredSteps: graph.deferred_steps,
+      blockedSteps: graph.blocked_steps,
+      remainingRunnableSteps: graph.remaining_runnable_steps,
+      ...(record === undefined ? {} : { goal: supervisionGoal(record) }),
+      execution: executionView(graph, currentStep),
+      ...(record === undefined ? {} : { history: sliceHistory(record.history) }),
     });
+    if (mapped.terminal && record !== undefined && (status === 'completed' || status === 'cancelled' || status === 'failed')) {
+      const already = record.history.some((event) => event.type === 'goal_completed' || event.type === 'goal_cancelled');
+      if (!already) {
+        this.goalStore.put(appendGoalEvent(record, status === 'cancelled' ? 'goal_cancelled' : 'goal_completed', { now: this.now() }));
+      }
+    }
+    if (!mapped.terminal) return mapped;
+    const warning = this.cleanupGoalTemps(sessionId, view);
+    return warning === undefined ? mapped : { ...mapped, cleanup_warning: warning };
   }
 
   // ── user questions / approvals ────────────────────────────────────────────
@@ -1047,6 +1473,9 @@ export class Bridge {
       pending.resolve(resolved);
     }
     this.log.info(`question ${questionId} answered`);
+    if (pending.sessionId !== undefined) {
+      this.noteGoalEvent(pending.sessionId, 'question_answered', { metadata: { question_id: questionId } });
+    }
     return { answered: true };
   }
 
@@ -1074,6 +1503,7 @@ export class Bridge {
       pending.resolve(outcome);
     }
     this.log.info(`approval ${approvalId} decided: ${decision}`);
+    this.noteGoalEvent(sessionId, 'approval_resolved', { metadata: { approval_id: approvalId, decision } });
     return { approval_id: approvalId, session_id: sessionId, decision, outcome };
   }
 
@@ -1082,4 +1512,63 @@ export class Bridge {
   listManaged(): string[] {
     return [...this.managed];
   }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((item) => item.trim() !== ''))];
+}
+
+const KNOWN_KINDS = new Set<string>([
+  'git_push', 'git_tag', 'npm_publish', 'github_release', 'git_worktree_add', 'npm_pack',
+]);
+
+function deferredKindsOf(record?: GoalRecord): ActionKind[] {
+  if (record === undefined) return [];
+  return record.deferred_step_ids.filter((id): id is ActionKind => KNOWN_KINDS.has(id));
+}
+
+function commandForCall(
+  events: readonly { type: string; data?: unknown }[] | undefined,
+  callId?: string,
+): string | undefined {
+  if (events === undefined || callId === undefined) return undefined;
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data === undefined || data.callId !== callId) continue;
+    const raw = typeof data.arguments === 'string' ? data.arguments : '';
+    const args = raw === '' ? undefined : parseArgsJson(raw);
+    return args === undefined ? undefined : extractCommand(args);
+  }
+  return undefined;
+}
+
+function changedFileCountOf(events: readonly { type: string; data?: unknown }[] | undefined): number {
+  if (events === undefined) return 0;
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data === undefined || typeof data.arguments !== 'string') continue;
+    const args = parseArgsJson(data.arguments);
+    if (args === undefined) continue;
+    const path = extractFilePath(args);
+    if (path !== undefined) seen.add(path);
+  }
+  return seen.size;
+}
+
+function findPostHocViolation(
+  facts: ReturnType<typeof foldGoalFacts>,
+  record: GoalRecord,
+): { step: string; reason: string } | undefined {
+  const found = findConstraintViolation(facts, record.constraints, []);
+  if (found === undefined) return undefined;
+  // Replay is enforced on later approvals, not on the original successful run
+  // (a tag create + tag push in one turn is two git_tag facts, not a replay).
+  if (found.decision.reason === 'no_destructive_replay') return undefined;
+  return {
+    step: found.fact.command ?? found.fact.name,
+    reason: found.decision.reason ?? 'constraint_rejected',
+  };
 }

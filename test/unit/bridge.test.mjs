@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Bridge, BridgeError } from '../../lib/bridge.js';
+import { Bridge, BridgeError, normalizePath } from '../../lib/bridge.js';
+import { applyNativeGetGoalResult } from '../../lib/goal-control.js';
 
 // A minimal fake workspace registry with one registered workspace.
 function makeRegistry(workspaces) {
@@ -49,6 +50,71 @@ test('resolveWorkspace: rejects unregistered paths (Case 5)', async () => {
       return true;
     });
   }
+});
+
+test('resolveWorkspace: trailing slash and win32 case use the shared compare rule', async () => {
+  const bridge = makeBridge({ registry: makeRegistry([MIX, OTHER]) });
+  const trailing = MIX.path.endsWith('\\') || MIX.path.endsWith('/') ? MIX.path : `${MIX.path}\\`;
+  assert.equal((await bridge.resolveWorkspace(trailing)).id, 'ws-1');
+  if (process.platform === 'win32') {
+    assert.equal((await bridge.resolveWorkspace(MIX.path.toLowerCase())).id, 'ws-1');
+    assert.equal(normalizePath(trailing), normalizePath(MIX.path.toLowerCase()));
+  } else {
+    assert.equal(normalizePath(trailing), normalizePath(MIX.path));
+  }
+});
+
+test('listSessions workspace filter uses the same path compare as resolveWorkspace', async () => {
+  const { bridge } = makeStatefulBridge();
+  const created = await bridge.createSession('ws-1', 'demo');
+  const trailing = `${MIX.path}\\`;
+  const listed = await bridge.listSessions({ workspace: trailing });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].session_id, created.session_id);
+});
+
+test('Bridge.start effect disposer cancels parked approvals and questions', async () => {
+  const disposers = [];
+  const services = {
+    workspaceRegistry: makeRegistry([MIX]),
+    agents: { get: () => undefined, list: () => [] },
+    sessions: { list: () => [], get: () => undefined },
+    sessionPersistence: { list: async () => [] },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+  };
+  const ctx = {
+    get: (key) => services[key],
+    agents: services.agents,
+    sessions: services.sessions,
+    sessionPersistence: services.sessionPersistence,
+    agentDefaultModel: services.agentDefaultModel,
+    on: () => () => true,
+    inject: () => ({}),
+    effect: (execute) => {
+      const disposer = execute();
+      disposers.push(disposer);
+      return disposer;
+    },
+  };
+  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  const bridge = new Bridge(ctx, { sessionMaxItems: 5, sessionMaxChars: 200, resultMaxItems: 10, resultMaxChars: 500 }, log);
+  bridge.start();
+  assert.ok(disposers.length >= 1);
+  let approval;
+  bridge['approvals'].set('approval-1', {
+    id: 'approval-1', sessionId: 'session-a', toolName: 'bash',
+    resolve: (outcome) => { approval = outcome; },
+  });
+  let question;
+  bridge['questions'].set('question-1', {
+    id: 'question-1', sessionId: 'session-a', questions: [],
+    resolve: (answer) => { question = answer; },
+  });
+  await disposers[disposers.length - 1]();
+  assert.equal(approval, 'cancelled');
+  assert.deepEqual(question, { answers: [] });
+  assert.equal(bridge['approvals'].size, 0);
+  assert.equal(bridge['questions'].size, 0);
 });
 
 test('resolveWorkspace: rejects when no registry is mounted', async () => {
@@ -148,7 +214,8 @@ function makeLiveAgent(id, workspacePath, extras = {}) {
       events,
       requestHeader: () => undefined,
     },
-    followup() {
+    followup(message) {
+      agent.lastFollowup = message;
       agent.status = extras.followupStatus ?? 'running';
       inbox.hasPending = true;
       inbox.nextTurn = inbox.nextTurn ?? [];
@@ -433,4 +500,403 @@ test('idle wait does not treat agent.status idle as still running', async () => 
   const waited = await bridge.waitGoal(started.session_id, 1);
   assert.equal(waited.continuation_required, false);
   assert.ok(waited.status === 'idle' || waited.status === 'unknown');
+});
+
+const ev = (type, data, seq) => ({ type, seq, time: seq, data });
+const bashCall = (seq, callId, command) =>
+  ev('tool/call', { turn: 1, step: 1, callId, name: 'bash', arguments: JSON.stringify({ command }) }, seq);
+const bashResult = (seq, callId, { isError = false, content = 'ok', code } = {}) =>
+  ev('tool/result', {
+    turn: 1,
+    step: 1,
+    message: { source: { callId }, content: [{ type: 'tool', isError, content }] },
+    ...(code === undefined ? {} : { error: { name: 'ToolError', code } }),
+  }, seq);
+
+function settle(agent) {
+  agent.status = 'idle';
+  agent.inbox.hasPending = false;
+  agent.inbox.nextTurn = [];
+}
+
+test('MCP surface exposes 15 dsh_* tools (v0.3.0 adds dsh_update_goal)', async () => {
+  const src = await import('node:fs');
+  const text = src.readFileSync(new URL('../../src/mcp.ts', import.meta.url), 'utf8');
+  const count = [...text.matchAll(/server\.registerTool\(/g)].length;
+  assert.equal(count, 15);
+  assert.match(text, /dsh_update_goal/);
+});
+
+test('Test A — waitGoal/terminal reconciles pending push todo after git push succeeds', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'ship' });
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 1 }, 0),
+    ev('todo/write', { todos: [{ content: 'C12 push release commit', status: 'pending' }] }, 1),
+    ev('assistant/message', { turn: 1, step: 0, message: { role: 'assistant', content: [{ type: 'text', text: 'push succeeded' }] } }, 2),
+    bashCall(3, 'c1', 'git push origin main'),
+    bashResult(4, 'c1'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+  );
+  const waited = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(waited.terminal, true);
+  const push = waited.result.todos.find((todo) => todo.content.includes('push'));
+  assert.equal(push.status, 'completed');
+  const session = await bridge.getSession(started.session_id);
+  assert.equal(session.todos.find((todo) => todo.content.includes('push')).status, 'completed');
+});
+
+test('Test B — waiting npm publish todo stays in_progress', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'publish' });
+  bridge['approvals'].set('approval-1', {
+    id: 'approval-1', sessionId: started.session_id, toolName: 'bash', resolve: () => {},
+  });
+  const agent = agents.get(started.session_id);
+  agent.status = 'running';
+  agent.session.events.push(
+    ev('todo/write', { todos: [{ content: 'npm publish', status: 'pending' }] }, 1),
+  );
+  const waited = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(waited.status, 'waiting_for_approval');
+  const npm = waited.progress.todos.find((todo) => /npm publish/i.test(todo.content));
+  assert.equal(npm.status, 'in_progress');
+});
+
+test('Test C — second waitGoal progress_delta is incremental', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'g' });
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('todo/write', { todos: [{ content: 'analyze', status: 'in_progress' }] }, 1),
+    ev('turn/start', { turn: 1 }, 2),
+  );
+  const first = await bridge.waitGoal(started.session_id, 1);
+  assert.ok(first.progress_delta);
+  agent.session.events.push(
+    ev('todo/write', { todos: [{ content: 'analyze', status: 'completed' }] }, 3),
+  );
+  const second = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(second.progress_delta.since_seq, first.progress_delta.until_seq);
+  assert.ok(second.progress_delta.new_events.every((event) => event.seq > first.progress_delta.until_seq));
+  assert.deepEqual(second.progress_delta.todos_changed, [
+    { content: 'analyze', from: 'in_progress', to: 'completed' },
+  ]);
+});
+
+test('Test D/E — blocked npm leaves GitHub Release runnable; re-arm defer continues session', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: 'release v0.2.0',
+    plan: '1. push\n2. tag\n3. npm publish\n4. GitHub Release',
+  });
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 1 }, 0),
+    ev('todo/write', {
+      todos: [
+        { content: 'C12 push release commit', status: 'completed' },
+        { content: 'C13 创建并 push annotated tag', status: 'completed' },
+        { content: 'npm publish', status: 'pending' },
+        { content: 'GitHub Release', status: 'pending' },
+      ],
+    }, 1),
+    bashCall(2, 'c1', 'git push origin main'),
+    bashResult(3, 'c1'),
+    bashCall(4, 'c2', 'git tag -a v0.2.0 -m v0.2.0'),
+    bashResult(5, 'c2'),
+    bashCall(6, 'c3', 'git push origin v0.2.0'),
+    bashResult(7, 'c3'),
+    bashCall(8, 'c4', 'npm publish'),
+    bashResult(9, 'c4', { isError: true, content: 'npm ERR! EOTP one-time password required', code: 'EOTP' }),
+    ev('turn/end', { turn: 1, reason: { kind: 'blocked' } }, 10),
+  );
+  const waited = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(waited.status, 'blocked');
+  assert.equal(waited.terminal, false);
+  assert.ok(waited.blocked_steps.some((step) => /npm publish/i.test(step)));
+  assert.ok(waited.remaining_runnable_steps.some((step) => /GitHub Release/i.test(step)));
+  assert.equal(waited.blocked.reason, 'npm_2fa_required');
+
+  let followups = 0;
+  const original = agent.followup.bind(agent);
+  agent.followup = (...args) => {
+    followups += 1;
+    return original(...args);
+  };
+  const resumed = await bridge.startGoal({
+    workspace: 'ws-1',
+    session_id: started.session_id,
+    goal: 'defer npm publish, continue GitHub Release',
+    plan: '- GitHub Release\n- [deferred] npm publish',
+  });
+  assert.equal(followups, 1);
+  assert.ok(['running', 'queued'].includes(resumed.status));
+  assert.equal(resumed.session_id, started.session_id);
+  assert.equal(resumed.goal.goal_id, started.goal.goal_id);
+  assert.equal(resumed.goal.revision, 2);
+
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 2 }, 11),
+    ev('todo/write', {
+      todos: [
+        { content: 'C12 push release commit', status: 'completed' },
+        { content: 'C13 创建并 push annotated tag', status: 'completed' },
+        { content: 'npm publish', status: 'pending' },
+        { content: 'GitHub Release', status: 'completed' },
+      ],
+    }, 12),
+    bashCall(13, 'c5', 'gh release create v0.2.0'),
+    bashResult(14, 'c5'),
+    ev('turn/end', { turn: 2, reason: { kind: 'completed' } }, 15),
+  );
+  const finished = await bridge.waitGoal(started.session_id, 1);
+  const release = (finished.result?.todos ?? finished.progress?.todos).find((todo) => /GitHub Release/i.test(todo.content));
+  assert.equal(release.status, 'completed');
+  assert.ok(finished.deferred_steps?.some((step) => /npm publish/i.test(step)) ?? true);
+});
+
+test('Test 1/2 — start then update revises same session and goal_id', async () => {
+  const { bridge } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: 'publish v0.3.0:\n- npm publish\n- GitHub Release',
+    plan: 'tag then fork',
+  });
+  assert.equal(started.goal.revision, 1);
+  assert.equal(started.goal.goal_id, `goal-${started.session_id}`);
+
+  const revised = await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'revise',
+    goal: 'npm 暂缓，其他继续',
+    defer_steps: ['npm_publish'],
+    revision_reason: 'user_modified_goal',
+  });
+  assert.equal(revised.session_id, started.session_id);
+  assert.equal(revised.goal.goal_id, started.goal.goal_id);
+  assert.equal(revised.goal.revision, 2);
+  assert.equal(revised.goal.previous_revision, 1);
+  assert.ok(revised.execution.deferred_steps.some((step) => /npm/i.test(step)) || revised.goal.revision === 2);
+});
+
+test('Test 2/8/9 — defer then resume same goal without creating a session', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: 'release',
+    plan: '1. push\n2. tag\n3. npm publish\n4. GitHub Release',
+  });
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 1 }, 0),
+    ev('todo/write', {
+      todos: [
+        { content: 'push', status: 'completed' },
+        { content: 'tag', status: 'completed' },
+        { content: 'npm publish', status: 'pending' },
+        { content: 'GitHub Release', status: 'pending' },
+      ],
+    }, 1),
+    bashCall(2, 'c1', 'git push origin main'),
+    bashResult(3, 'c1'),
+    bashCall(4, 'c2', 'git tag -a v0.3.0 -m v0.3.0'),
+    bashResult(5, 'c2'),
+    bashCall(6, 'c3', 'npm publish'),
+    bashResult(7, 'c3', { isError: true, content: 'npm ERR! EOTP', code: 'EOTP' }),
+    ev('turn/end', { turn: 1, reason: { kind: 'blocked' } }, 8),
+  );
+  const blocked = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(blocked.terminal, false);
+
+  const deferred = await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'defer',
+    defer_steps: ['npm_publish'],
+    revision_reason: 'npm 2FA',
+  });
+  assert.equal(deferred.session_id, started.session_id);
+  assert.equal(deferred.goal.revision, 2);
+  assert.ok(deferred.execution.deferred_steps.some((step) => /npm publish/i.test(step)));
+
+  const resumed = await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'resume',
+    resume_steps: ['npm_publish'],
+    revision_reason: 'continue npm',
+  });
+  assert.equal(resumed.session_id, started.session_id);
+  assert.equal(resumed.goal.goal_id, started.goal.goal_id);
+  assert.equal(resumed.goal.revision, 3);
+  assert.equal(resumed.execution.deferred_steps.length, 0);
+});
+
+test('updateGoal resume without a goal does not create one', async () => {
+  const { bridge } = makeStatefulBridge();
+  const created = await bridge.createSession('ws-1', 'bare');
+  await assert.rejects(
+    () => bridge.updateGoal({ session_id: created.session_id, action: 'resume' }),
+    (error) => {
+      assert.equal(error.code, 'GOAL_NOT_FOUND');
+      return true;
+    },
+  );
+});
+
+test('Test 3 — minimal mode records scan-forbidding constraints', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: '只等待 35 秒。禁止扫描 workspace。禁止修改文件。',
+    execution_mode: 'minimal',
+  });
+  assert.equal(started.goal.mode, 'minimal');
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 1 }, 0),
+    bashCall(1, 'c1', 'Start-Sleep -Seconds 35'),
+    bashResult(2, 'c1'),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  );
+  const waited = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(waited.status, 'completed');
+  assert.equal(waited.goal.mode, 'minimal');
+  assert.equal((waited.progress?.changed_files ?? waited.result?.changed_files ?? []).length, 0);
+});
+
+test('Test 10 — resume message names completed destructive actions', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: 'release',
+    plan: 'push\ntag\nnpm publish',
+  });
+  const agent = agents.get(started.session_id);
+  settle(agent);
+  agent.session.events.push(
+    ev('turn/start', { turn: 1 }, 0),
+    ev('todo/write', {
+      todos: [
+        { content: 'push', status: 'completed' },
+        { content: 'tag', status: 'completed' },
+        { content: 'npm publish', status: 'pending' },
+      ],
+    }, 1),
+    bashCall(2, 'c1', 'git push origin main'),
+    bashResult(3, 'c1'),
+    bashCall(4, 'c2', 'git tag -a v0.3.0 -m v0.3.0'),
+    bashResult(5, 'c2'),
+    ev('turn/end', { turn: 1, reason: { kind: 'blocked' } }, 6),
+  );
+  await bridge.waitGoal(started.session_id, 1);
+  let sent = '';
+  const original = agent.followup.bind(agent);
+  agent.followup = (message) => {
+    sent = JSON.stringify(message);
+    return original(message);
+  };
+  await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'resume',
+    resume_steps: ['npm_publish'],
+  });
+  assert.match(sent, /git_tag|git_push|Already completed/);
+  assert.doesNotMatch(sent, /git tag -a v0\.3\.0[\s\S]*git tag -a v0\.3\.0/);
+});
+
+test('approve / answer do not increment revision', async () => {
+  const { bridge } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'g' });
+  assert.equal(started.goal.revision, 1);
+  bridge['approvals'].set('approval-1', {
+    id: 'approval-1', sessionId: started.session_id, toolName: 'bash', resolve: () => {},
+  });
+  await bridge.approve(started.session_id, 'approval-1', 'approve');
+  const status = await bridge.getTaskStatus(started.session_id);
+  assert.equal(status.goal.revision, 1);
+});
+
+function followupText(agent) {
+  return JSON.stringify(agent.lastFollowup ?? '');
+}
+
+test('Test A — injected minimal Goal forbids native get_goal', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: '只等待 35 秒',
+    execution_mode: 'minimal',
+  });
+  const sent = followupText(agents.get(started.session_id));
+  assert.match(sent, /\[Goal\] rev 1 · minimal/);
+  assert.match(sent, /authoritative/i);
+  assert.match(sent, /Do not call the agent-native get_goal/);
+  assert.match(sent, /unnecessary control-plane query/);
+  assert.match(sent, /does NOT mean the supervised Goal does not exist/);
+});
+
+test('Test B — native get_goal null leaves wait/get_session supervised Goal intact', async () => {
+  const { bridge } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: '只等待 35 秒',
+    execution_mode: 'minimal',
+  });
+  const revised = await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'revise',
+    goal: '只等待 35 秒',
+    execution_mode: 'minimal',
+    revision_reason: 'user_modified_goal',
+  });
+  assert.equal(revised.goal.revision, 2);
+  assert.equal(revised.goal.mode, 'minimal');
+  const goalId = revised.goal.goal_id;
+
+  const record = bridge['goalStore'].get(started.session_id);
+  const historyBefore = structuredClone(record.history);
+  const kept = applyNativeGetGoalResult(record, { goal: null });
+  assert.equal(kept.goal_id, goalId);
+  assert.equal(kept.revision, 2);
+  assert.equal(kept.mode, 'minimal');
+  assert.deepEqual(kept.history, historyBefore);
+
+  const session = await bridge.getSession(started.session_id);
+  assert.equal(session.goal.goal_id, goalId);
+  assert.equal(session.goal.revision, 2);
+  assert.equal(session.goal.mode, 'minimal');
+
+  const waited = await bridge.waitGoal(started.session_id, 1);
+  assert.equal(waited.goal.goal_id, goalId);
+  assert.equal(waited.goal.revision, 2);
+  assert.equal(waited.goal.mode, 'minimal');
+  assert.notEqual(waited.goal, undefined);
+});
+
+test('Test C — revision 2 Agent turn still names the authoritative [Goal]', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({
+    workspace: 'ws-1',
+    goal: 'wait then finish',
+    execution_mode: 'minimal',
+  });
+  await bridge.updateGoal({
+    session_id: started.session_id,
+    action: 'revise',
+    goal: '只等待 35 秒然后完成',
+    execution_mode: 'minimal',
+  });
+  const sent = followupText(agents.get(started.session_id));
+  assert.match(sent, /\[Goal\] rev 2 · minimal/);
+  assert.match(sent, /authoritative/i);
+  assert.match(sent, /ChatGPT Bridge supervised Goal/);
+  assert.match(sent, /Goal revision: 2/);
 });

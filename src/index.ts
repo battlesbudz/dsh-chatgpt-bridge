@@ -9,7 +9,7 @@ import { Bridge } from './bridge.js';
 import { ConfigSchema, resolveConfig, type BridgeConfigInput, type ResolvedBridgeConfig } from './config.js';
 import { createBridgeLogger } from './log.js';
 import { createMcpServer } from './mcp.js';
-import { startHttpServer } from './http.js';
+import { startHttpServer, type HttpServerHandle } from './http.js';
 
 export const name = 'chatgpt-bridge';
 
@@ -36,50 +36,61 @@ export function apply(ctx: Context, config: BridgeConfigInput): void {
   bridge.start();
 
   const mcpServer = createMcpServer(bridge, cfg, log);
-  let httpHandle: { close(): Promise<void> } | undefined;
   let stdioTransport: StdioServerTransport | undefined;
+  let stdioReady: Promise<void> | undefined;
+  let httpReady: Promise<HttpServerHandle> | undefined;
 
   if (cfg.transport === 'stdio') {
     log.info('MCP stdio transport active — speak JSON-RPC on stdin/stdout');
     stdioTransport = new StdioServerTransport();
-    void mcpServer.connect(stdioTransport).catch((error) => {
+    stdioReady = mcpServer.connect(stdioTransport).catch((error) => {
       log.error(`stdio transport failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   } else {
-    void startHttpServer(
+    httpReady = startHttpServer(
       () => createMcpServer(bridge, cfg, log),
       { host: cfg.host, port: cfg.port, authMode: cfg.authMode, authToken: cfg.authToken },
       log,
-    )
-      .then((handle) => {
-        httpHandle = handle;
-      })
-      .catch((error) => {
-        log.error(`failed to start MCP HTTP server: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    );
+    void httpReady.catch((error) => {
+      log.error(`failed to start MCP HTTP server: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
-  // Full teardown: disabling or unloading the plugin row must remove the MCP
-  // endpoint while DSH keeps running untouched. Bridge-owned agents are
-  // disposed with this fiber; their sessions stay persisted for later resume.
-  (ctx as unknown as { on(event: string, cb: () => void): void }).on('dispose', () => {
+  // Fiber-owned effect: Cordis awaits this disposer, so the MCP endpoint is
+  // actually gone before the plugin row finishes unloading.
+  ctx.effect(() => async () => {
     log.info('bridge shutting down: closing MCP server and transports');
-    void (async () => {
+    if (httpReady !== undefined) {
       try {
-        if (httpHandle !== undefined) await httpHandle.close();
-      } catch (error) {
-        log.error(`http server close failed: ${error instanceof Error ? error.message : String(error)}`);
+        const handle = await httpReady;
+        try {
+          await handle.close();
+        } catch (error) {
+          log.error(`http server close failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } catch {
+        // start already logged; nothing listening
       }
+    }
+    if (stdioReady !== undefined) {
       try {
-        if (stdioTransport !== undefined) await stdioTransport.close();
+        await stdioReady;
+      } catch {
+        // connect already logged
+      }
+    }
+    if (stdioTransport !== undefined) {
+      try {
+        await stdioTransport.close();
       } catch {
         // best-effort
       }
-      try {
-        await mcpServer.close();
-      } catch {
-        // best-effort
-      }
-    })();
+    }
+    try {
+      await mcpServer.close();
+    } catch {
+      // best-effort
+    }
   });
 }

@@ -1,5 +1,5 @@
 /**
- * MCP server surface: the fourteen dsh_* tools ChatGPT calls. Every tool maps
+ * MCP server surface: the fifteen dsh_* tools ChatGPT calls. Every tool maps
  * onto a Bridge operation; nothing here reaches the filesystem, the shell,
  * or DSH internals directly. Outputs are JSON text blocks; failures are
  * reported as isError results with { error: { code, message } }.
@@ -10,7 +10,27 @@ import { Bridge, BridgeError } from './bridge.js';
 import type { ResolvedBridgeConfig } from './config.js';
 import type { BridgeLogger } from './log.js';
 import { redactValue } from './redact.js';
+import { parseConstraints } from './goal-constraints.js';
 import { BRIDGE_NAME, BRIDGE_VERSION } from './version.js';
+
+const actionClassSchema = z.enum([
+  'filesystem.read',
+  'filesystem.write',
+  'filesystem.scan',
+  'process.exec',
+  'git.mutate',
+  'npm.publish',
+  'github.release',
+  'network',
+]);
+
+const constraintSchema = z.object({
+  read_only: z.boolean().optional(),
+  allow_workspace_scan: z.boolean().optional(),
+  max_changed_files: z.number().int().min(0).optional(),
+  allowed_actions: z.array(actionClassSchema).optional(),
+  forbidden_actions: z.array(actionClassSchema).optional(),
+});
 
 function textResult(value: unknown): { content: { type: 'text'; text: string }[] } {
   return { content: [{ type: 'text', text: JSON.stringify(redactValue(value), null, 2) }] };
@@ -232,17 +252,71 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
         'continues a native DSH session, writes the goal+plan as a user message, and returns ' +
         'continuation_required + next_tool_call. If continuation_required is true, immediately ' +
         'call dsh_wait_goal in this same assistant turn. Do not tell the user the task is merely ' +
-        'running in the background. Optional request_id makes connector retries idempotent.',
+        'running in the background. Optional request_id makes connector retries idempotent. '
+        + 'Passing session_id revises the existing Goal (revision +1, history kept). '
+        + 'To defer or resume steps without rewriting the goal, prefer dsh_update_goal. '
+        + 'execution_mode defaults to standard; constraints only tighten DSH permissions.',
       inputSchema: z.object({
         workspace: z.string().min(1).describe('Workspace id, path, or title from dsh_list_workspaces'),
         goal: z.string().min(1).max(20000).describe('The completion target for DSH'),
         plan: z.string().max(20000).optional().describe('Optional execution plan DSH should follow'),
         session_id: z.string().optional().describe('Continue this existing DSH session; omit to create a new one'),
         request_id: z.string().min(1).max(200).optional().describe('Idempotency key for connector retries in this process'),
+        execution_mode: z.enum(['standard', 'minimal', 'strict']).optional()
+          .describe('standard (default), minimal (necessary actions only), or strict (follow plan/constraints)'),
+        constraints: constraintSchema.optional().describe('Structured Goal constraints; can only tighten DSH policy'),
       }),
     },
-    safe(async (args: { workspace: string; goal: string; plan?: string; session_id?: string; request_id?: string }) =>
-      bridge.startGoal(args)),
+    safe(async (args: {
+      workspace: string;
+      goal: string;
+      plan?: string;
+      session_id?: string;
+      request_id?: string;
+      execution_mode?: 'standard' | 'minimal' | 'strict';
+      constraints?: unknown;
+    }) => bridge.startGoal({ ...args, constraints: parseConstraints(args.constraints) })),
+  );
+
+  server.registerTool(
+    'dsh_update_goal',
+    {
+      title: 'Revise, defer, or resume a supervised Goal',
+      description:
+        'Control-plane update for an EXISTING supervised Goal. session_id is required and this '
+        + 'tool never creates a session. action=revise changes goal/plan/mode/constraints; '
+        + 'action=defer marks steps deferred (not failed) so independent branches can continue; '
+        + 'action=resume reactivates deferred/blocked steps without replaying completed '
+        + 'destructive actions. Each call increments Goal revision and keeps history. '
+        + 'Then call dsh_wait_goal if continuation_required is true.',
+      inputSchema: z.object({
+        session_id: z.string().min(1).describe('Existing DSH session that already has a Goal'),
+        action: z.enum(['revise', 'defer', 'resume']).optional()
+          .describe('revise (default), defer a step, or resume deferred/blocked work'),
+        goal: z.string().max(20000).optional().describe('Replacement goal text (revise)'),
+        plan: z.string().max(20000).optional().describe('Replacement plan'),
+        execution_mode: z.enum(['standard', 'minimal', 'strict']).optional(),
+        constraints: constraintSchema.optional(),
+        defer_steps: z.array(z.string().min(1)).optional()
+          .describe('Step ids, kinds, or content fragments to defer (e.g. npm_publish)'),
+        resume_steps: z.array(z.string().min(1)).optional()
+          .describe('Step ids/kinds to resume; omit on action=resume to resume all deferred steps'),
+        revision_reason: z.string().max(200).optional(),
+        request_id: z.string().min(1).max(200).optional(),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      action?: 'revise' | 'defer' | 'resume';
+      goal?: string;
+      plan?: string;
+      execution_mode?: 'standard' | 'minimal' | 'strict';
+      constraints?: unknown;
+      defer_steps?: string[];
+      resume_steps?: string[];
+      revision_reason?: string;
+      request_id?: string;
+    }) => bridge.updateGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
   server.registerTool(

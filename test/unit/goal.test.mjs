@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   RequestIdMap,
+  SUPERVISED_GOAL_AUTHORITY,
   buildGoalMessage,
+  buildSupervisedGoalContext,
   clampWaitSeconds,
   fingerprintStart,
   isActiveStatus,
@@ -11,6 +13,7 @@ import {
   mapWaitGoal,
   titleFromGoal,
 } from '../../lib/goal.js';
+import { applyRevision, createGoalRecord } from '../../lib/goal-control.js';
 
 test('clampWaitSeconds bounds 1-30 and defaults to 25', () => {
   assert.equal(clampWaitSeconds(undefined), 25);
@@ -163,6 +166,22 @@ test('mapWaitGoal: failed/cancelled/blocked/interrupted are terminal', () => {
   }
 });
 
+test('mapWaitGoal: blocked with remaining runnable steps is not terminal', () => {
+  const out = mapWaitGoal({
+    sessionId: 's1',
+    status: 'blocked',
+    waitedMs: 1,
+    waitSeconds: 25,
+    changedFiles: [],
+    assistantSummary: 'npm blocked',
+    remainingRunnableSteps: ['GitHub Release'],
+    blockedSteps: ['npm publish'],
+  });
+  assert.equal(out.terminal, false);
+  assert.equal(out.continuation_required, false);
+  assert.deepEqual(out.remaining_runnable_steps, ['GitHub Release']);
+});
+
 test('fingerprintStart is stable and distinguishes fields', () => {
   const a = fingerprintStart({ workspace: 'ws', goal: 'g', plan: 'p' });
   const b = fingerprintStart({ workspace: 'ws', goal: 'g', plan: 'p' });
@@ -179,4 +198,52 @@ test('RequestIdMap is FIFO-capped', () => {
   assert.equal(map.get('a'), undefined);
   assert.equal(map.get('b').sessionId, 's2');
   assert.equal(map.get('c').sessionId, 's3');
+});
+
+function assertAuthoritativeSupervisedGoal(text) {
+  assert.match(text, /ChatGPT Bridge supervised Goal/);
+  assert.match(text, /\[Goal\]/);
+  assert.match(text, /authoritative/i);
+  assert.match(text, /get_goal/);
+  assert.match(text, /does NOT mean the supervised Goal does not exist/i);
+  assert.match(text, /must never override/i);
+}
+
+test('Test A — minimal supervised context forbids native get_goal', () => {
+  const record = createGoalRecord({
+    sessionId: 'session-35s',
+    goal: '只等待 35 秒',
+    mode: 'minimal',
+    now: 1,
+  });
+  const injected = buildSupervisedGoalContext(record, record.goal, undefined, 'start');
+  assertAuthoritativeSupervisedGoal(injected);
+  assert.match(injected, /\[Goal\] rev 1 · minimal/);
+  assert.match(injected, /Execution mode: minimal/);
+  assert.match(injected, /unnecessary control-plane query/);
+  assert.match(injected, /Do not call the agent-native get_goal/);
+  assert.match(injected, /只等待 35 秒/);
+  assert.equal(SUPERVISED_GOAL_AUTHORITY.includes('get_goal'), true);
+});
+
+test('Test C — revision 2 injection stays the authoritative [Goal]', () => {
+  const first = createGoalRecord({
+    sessionId: 'session-rev',
+    goal: 'wait then finish',
+    mode: 'minimal',
+    now: 1,
+  });
+  const second = applyRevision(first, {
+    goal: '只等待 35 秒然后完成',
+    mode: 'minimal',
+    revisionReason: 'user_modified_goal',
+    now: 2,
+  }, 'goal_revised');
+  assert.equal(second.revision, 2);
+  const injected = buildSupervisedGoalContext(second, second.goal, undefined, 'revise');
+  assert.match(injected, /\[Goal\] rev 2 · minimal/);
+  assertAuthoritativeSupervisedGoal(injected);
+  assert.match(injected, /goal_id=goal-session-rev/);
+  assert.match(injected, /revision=2/);
+  assert.match(injected, /Goal revision: 2/);
 });

@@ -6,7 +6,11 @@ import type { ResolvedBridgeConfig } from './config.js';
 import type { BridgeLogger } from './log.js';
 import { type BridgeStatus } from './status.js';
 import { type MessageRow, type ToolCallInfo } from './session-view.js';
-import { type GoalStartResult, type GoalWaitResult } from './goal.js';
+import { type ExecutionSupervisionView, type GoalStartResult, type GoalWaitResult } from './goal.js';
+import { type BlockedInfo } from './goal-graph.js';
+import { type GoalHistoryEvent, type GoalSupervisionView } from './goal-control.js';
+import { type ExecutionMode, type GoalConstraints } from './goal-constraints.js';
+export { normalizePath } from './paths.js';
 /** Typed bridge error with a stable machine-readable code. */
 export declare class BridgeError extends Error {
     readonly code: string;
@@ -116,6 +120,13 @@ export interface SessionView {
         content: string;
         status: string;
     }[];
+    blocked?: BlockedInfo;
+    deferred_steps?: string[];
+    blocked_steps?: string[];
+    remaining_runnable_steps?: string[];
+    goal?: GoalSupervisionView;
+    execution?: ExecutionSupervisionView;
+    history?: GoalHistoryEvent[];
 }
 export interface SessionSummary {
     session_id: string;
@@ -140,8 +151,6 @@ export interface ResultView {
 }
 /** DSH version string, resolved lazily from the installed package. */
 export declare function dshVersion(): string;
-/** Normalize a path for comparison (case-insensitive on win32). */
-export declare function normalizePath(path: string): string;
 /** The bridge service. One instance per plugin activation. */
 export declare class Bridge {
     private readonly ctx;
@@ -156,8 +165,11 @@ export declare class Bridge {
     private questionsEnabled;
     private started;
     private readonly goalRequests;
+    private readonly goalStore;
+    private readonly pollCursors;
     private apiProxy;
     private muxAbort;
+    private webOwnsApprovals;
     /** Test hooks for bounded wait loops. */
     now: () => number;
     sleep: (ms: number) => Promise<void>;
@@ -220,6 +232,17 @@ export declare class Bridge {
             reason?: string;
         };
         updated_at?: string;
+        todos?: {
+            content: string;
+            status: string;
+        }[];
+        blocked?: BlockedInfo;
+        deferred_steps?: string[];
+        blocked_steps?: string[];
+        remaining_runnable_steps?: string[];
+        goal?: GoalSupervisionView;
+        execution?: ExecutionSupervisionView;
+        history?: GoalHistoryEvent[];
     }>;
     startGoal(input: {
         workspace: string;
@@ -227,6 +250,21 @@ export declare class Bridge {
         plan?: string;
         session_id?: string;
         request_id?: string;
+        execution_mode?: ExecutionMode;
+        constraints?: GoalConstraints;
+    }): Promise<GoalStartResult>;
+    updateGoal(input: {
+        session_id: string;
+        action?: 'revise' | 'defer' | 'resume';
+        goal?: string;
+        plan?: string;
+        execution_mode?: ExecutionMode;
+        constraints?: GoalConstraints;
+        defer_steps?: string[];
+        resume_steps?: string[];
+        revision_reason?: string;
+        request_id?: string;
+        workspace?: string;
     }): Promise<GoalStartResult>;
     waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult>;
     stopGoal(sessionId: string): Promise<{
@@ -234,8 +272,17 @@ export declare class Bridge {
         stopped: true;
         already_stopped: boolean;
         status: BridgeStatus;
+        cleanup_warning?: string;
     }>;
     private failClosedWaiting;
+    private applyStartOrRevise;
+    private controlMessage;
+    private mapGoalStart;
+    private noteGoalEvent;
+    private rejectConstraint;
+    private observeGoal;
+    private goalFields;
+    private cleanupGoalTemps;
     private goalSnapshot;
     answerQuestion(questionId: string, sessionId: string | undefined, answer: {
         selected: string[];
