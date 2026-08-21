@@ -2,8 +2,8 @@
 
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. v0.4.0 — *Native Settings & Process Runtime Manager*.
-The v0.3.0 Goal Control Plane is unchanged. The bridge only
+Protocol**. v0.4.1 — *DSH 0.1.1-rc.1 Compatibility Release & Native Settings*.
+The v0.3.0 Goal Control Plane and v0.4.0 Native Settings are preserved. The bridge only
 *connects* — DSH keeps its own session log, agent loop, tools, skills,
 subagents, workflows, approvals, sandbox and workspace security model. It is a
 standalone DSH plugin: **zero DSH core modifications**.
@@ -13,9 +13,9 @@ standalone DSH plugin: **zero DSH core modifications**.
 > self-hosted DSH**. It does not make DSH call ChatGPT, and it does not route
 > DSH model requests through ChatGPT.
 
-> Self-hosted / dogfooding development: implemented against the installed DeepSeek
-> Harness source (`0.1.0-rc.6`) and verified end-to-end against a live local DSH
-> runtime with the official MCP SDK client.
+> Self-hosted / dogfooding development: implemented against DeepSeek
+> Harness and verified end-to-end against live local DSH
+> runtimes (verified up to `0.1.1-rc.1`) with the official MCP SDK client.
 
 ## Real-world setup
 
@@ -36,7 +36,7 @@ install and verify.
 
 - **Node.js >= 22** installed and on your `PATH`.
 - **A working DeepSeek Harness (DSH) installation** — `dsh` on your `PATH`
-  (or use `pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6` in place of `dsh` in every
+  (or use `pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1` in place of `dsh` in every
   command below).
 - **A web profile is recommended.** The Web UI and the Bridge should run in
   the same web profile/runtime so that ChatGPT-created sessions appear live
@@ -372,7 +372,7 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 ## Detailed install
 
 The plugin is a standard DSH profile bundle. It currently targets DSH
-`0.1.0-rc.6`.
+`0.1.1-rc.1` (verified baseline).
 
 **Recommended: one DSH runtime for both Web `:3080` and the MCP bridge `:3456`.**
 ChatGPT-created sessions are native DSH sessions. The Web UI only sees them
@@ -386,11 +386,11 @@ The Quick Start uses `dsh plugin --profile web add dsh-chatgpt-bridge`. If
 `dsh` is not on your `PATH`, the equivalent is:
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add dsh-chatgpt-bridge
-# published: ... add dsh-chatgpt-bridge@0.4.0
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add dsh-chatgpt-bridge
+# published: ... add dsh-chatgpt-bridge@0.4.1
 
 # boot ONE process — Web :3080 and MCP :3456
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile web
 ```
 
 `dsh_health.capabilities.webSurface` is `true` when the Web gateway is in this
@@ -403,8 +403,8 @@ and can be resumed later, but DSH Web `:3080` will not stream them in real
 time.
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.4.0
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.4.1
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile chatgpt-bridge
 ```
 
 The published npm package is available at
@@ -417,8 +417,8 @@ git clone https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git
 cd dsh-chatgpt-bridge
 npm ci
 npm run build
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add "file:$PWD"
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add "file:$PWD"
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile web
 ```
 
 For either installation method, `dsh plugin` installs the package into the
@@ -765,9 +765,14 @@ DSH core modifications: **0**.
 
 ## DSH compatibility
 
-- Developed and verified against **DeepSeek Harness `0.1.0-rc.6`** (profile
-  bundle `@deepseek-ai/dsh-base`), Node >= 22.
-- Uses only public plugin seams; no DSH core files are modified.
+| DSH Version | Status | Notes |
+| --- | --- | --- |
+| **0.1.1-rc.1** | **Verified** | Primary baseline for `dsh-chatgpt-bridge@0.4.1` (all tests, types, and integration gates green) |
+| 0.1.0-rc.7 | Compatible | Full compatibility with previous patch/fixes |
+| 0.1.0-rc.6 | Previously Verified | Initial v0.4.0 baseline |
+
+- Node >= 22.
+- Uses only public plugin seams; zero DSH core files are modified.
 
 ---
 

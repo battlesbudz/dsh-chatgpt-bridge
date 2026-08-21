@@ -70,14 +70,15 @@ console.log('target:', BASE);
 const transport = new StreamableHTTPClientTransport(new URL(BASE), {
   requestInit: readToken() ? { headers: { Authorization: `Bearer ${readToken()}` } } : {},
 });
-const client = new Client({ name: 'dsh-chatgpt-bridge-goal-dogfood', version: '0.4.0' });
+const client = new Client({ name: 'dsh-chatgpt-bridge-goal-dogfood', version: '0.4.1' });
 
 try {
   await client.connect(transport);
 
+  console.log('\n[1] health + capabilities');
   const health = await call(client, 'dsh_health');
-  check('bridge reachable', health.isError === false && health.parsed?.status === 'ok', JSON.stringify(health.parsed));
-  check('version 0.4.0', health.parsed?.bridge?.version === '0.4.0', String(health.parsed?.bridge?.version));
+  check('health status ok', health.isError === false && health.parsed?.status === 'ok', JSON.stringify(health.parsed));
+  check('version 0.4.1', health.parsed?.bridge?.version === '0.4.1', String(health.parsed?.bridge?.version));
 
   const listed = await call(client, 'dsh_list_workspaces');
   const workspaces = listed.parsed?.workspaces ?? listed.parsed ?? [];

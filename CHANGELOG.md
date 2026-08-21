@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.1 — 2026-08-21
+
+DSH 0.1.1-rc.1 compatibility release. Upgrades the `@deepseek-ai/dsh-*` dependency
+family to `0.1.1-rc.1` across runtime dependencies and devDependencies, reinforces
+wire-contract regression tests for the Web Gateway (`src/web-gateway.ts`), and verifies
+full compatibility across Native Settings, RuntimeManager ownership/lifecycle invariants,
+and the 15 MCP public tools.
+
+### Changed
+
+- **DSH Runtime Family Upgrade**: Unified all `@deepseek-ai/dsh-*` dependencies to `0.1.1-rc.1`
+  (`@deepseek-ai/dsh-agent`, `@deepseek-ai/dsh-agent-presets`, `@deepseek-ai/dsh-llm`,
+  `@deepseek-ai/dsh-session`, `@deepseek-ai/dsh-session-title`, `@deepseek-ai/dsh-agent-default-model`,
+  `@deepseek-ai/dsh-session-persistence`, `@deepseek-ai/dsh-session-projection`,
+  `@deepseek-ai/dsh-session-projection-cache`, `@deepseek-ai/dsh-user-approval`,
+  `@deepseek-ai/dsh-user-questions`, `@deepseek-ai/dsh-workspace`).
+- **Synchronized Lockfiles**: Regenerated and aligned both `package-lock.json` and `pnpm-lock.yaml`.
+
+### Added
+
+- **Web Gateway Wire Contract Regression Suite**: Added comprehensive test coverage for
+  `apiProxy.events.mux` stream processing and `apiProxy.respond` client-response frames,
+  including single/multi/custom user-question resolution, permission approval flow,
+  session mismatch guards, gateway rejection handling, malformed envelope protection,
+  and concurrent multi-session isolation without crosstalk.
+
 ## 0.4.0 — 2026-08-21
 
 Native Settings + Tunnel Runtime Manager. The DSH Web settings surface now

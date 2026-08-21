@@ -100,6 +100,7 @@ export function startMuxMirror(
     try {
       for await (const envelope of api.events.mux({ rpcId: randomUUID(), payload: {} }, signal)) {
         if (signal.aborted) return;
+        if (envelope === null || typeof envelope !== 'object') continue;
         const payload = envelope.payload;
         if (payload === undefined || typeof payload.type !== 'string') continue;
         const sessionId = payload.sessionId ?? '';
