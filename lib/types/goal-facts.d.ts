@@ -44,3 +44,11 @@ export declare function lastEventSeq(events: readonly LooseEvent[]): number | un
 /** True when a failed npm publish fact looks like a 2FA / OTP gate. */
 export declare function factLooksLikeNpm2fa(fact: ToolFact): boolean;
 export declare function successfulKinds(facts: GoalFacts): Set<ActionKind>;
+export declare function commandForCall(events: readonly {
+    type: string;
+    data?: unknown;
+}[] | undefined, callId?: string): string | undefined;
+export declare function changedFileCountOf(events: readonly {
+    type: string;
+    data?: unknown;
+}[] | undefined): number;

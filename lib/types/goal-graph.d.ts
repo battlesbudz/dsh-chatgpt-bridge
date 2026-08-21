@@ -64,3 +64,5 @@ export interface BlockedDescribeInput {
     };
 }
 export declare function describeBlocked(input: BlockedDescribeInput): BlockedInfo | undefined;
+export declare const KNOWN_ACTION_KINDS: Set<string>;
+export declare function deferredKindsOf(deferredStepIds?: readonly string[]): ActionKind[];

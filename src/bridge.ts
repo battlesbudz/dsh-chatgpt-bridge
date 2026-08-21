@@ -58,10 +58,17 @@ import {
   type GoalStartResult,
   type GoalWaitResult,
 } from './goal.js';
-import { extractCommand, extractFilePath, foldGoalFacts, parseArgsJson, successfulKinds, type ActionKind } from './goal-facts.js';
+import {
+  changedFileCountOf,
+  commandForCall,
+  foldGoalFacts,
+  successfulKinds,
+  type ActionKind,
+} from './goal-facts.js';
 import { reconcileTodos } from './goal-reconcile.js';
 import {
   buildGoalGraph,
+  deferredKindsOf,
   describeBlocked,
   detectDeferredKinds,
   inferBlockedKind,
@@ -86,7 +93,7 @@ import {
 } from './goal-control.js';
 import {
   evaluateConstraint,
-  findConstraintViolation,
+  findPostHocViolation,
   parseConstraints,
   parseExecutionMode,
   type ExecutionMode,
@@ -1290,7 +1297,7 @@ export class Bridge {
       holdInProgress: isHeld,
     });
     const blockedKind = inferBlockedKind(facts, status);
-    const deferredKinds = deferredKindsOf(record);
+    const deferredKinds = deferredKindsOf(record?.deferred_step_ids);
     const graph = buildGoalGraph({
       ...(todos === undefined ? {} : { todos }),
       ...(record?.plan === undefined ? {} : { plan: record.plan }),
@@ -1309,7 +1316,7 @@ export class Bridge {
       question: waiting.questions[0],
     });
     if (record !== undefined) {
-      const violation = findPostHocViolation(facts, record);
+      const violation = findPostHocViolation(facts, record.constraints);
       if (violation !== undefined) {
         blocked = {
           step: violation.step,
@@ -1516,59 +1523,4 @@ export class Bridge {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((item) => item.trim() !== ''))];
-}
-
-const KNOWN_KINDS = new Set<string>([
-  'git_push', 'git_tag', 'npm_publish', 'github_release', 'git_worktree_add', 'npm_pack',
-]);
-
-function deferredKindsOf(record?: GoalRecord): ActionKind[] {
-  if (record === undefined) return [];
-  return record.deferred_step_ids.filter((id): id is ActionKind => KNOWN_KINDS.has(id));
-}
-
-function commandForCall(
-  events: readonly { type: string; data?: unknown }[] | undefined,
-  callId?: string,
-): string | undefined {
-  if (events === undefined || callId === undefined) return undefined;
-  for (const event of events) {
-    if (event.type !== 'tool/call') continue;
-    const data = event.data as Record<string, unknown> | undefined;
-    if (data === undefined || data.callId !== callId) continue;
-    const raw = typeof data.arguments === 'string' ? data.arguments : '';
-    const args = raw === '' ? undefined : parseArgsJson(raw);
-    return args === undefined ? undefined : extractCommand(args);
-  }
-  return undefined;
-}
-
-function changedFileCountOf(events: readonly { type: string; data?: unknown }[] | undefined): number {
-  if (events === undefined) return 0;
-  const seen = new Set<string>();
-  for (const event of events) {
-    if (event.type !== 'tool/call') continue;
-    const data = event.data as Record<string, unknown> | undefined;
-    if (data === undefined || typeof data.arguments !== 'string') continue;
-    const args = parseArgsJson(data.arguments);
-    if (args === undefined) continue;
-    const path = extractFilePath(args);
-    if (path !== undefined) seen.add(path);
-  }
-  return seen.size;
-}
-
-function findPostHocViolation(
-  facts: ReturnType<typeof foldGoalFacts>,
-  record: GoalRecord,
-): { step: string; reason: string } | undefined {
-  const found = findConstraintViolation(facts, record.constraints, []);
-  if (found === undefined) return undefined;
-  // Replay is enforced on later approvals, not on the original successful run
-  // (a tag create + tag push in one turn is two git_tag facts, not a replay).
-  if (found.decision.reason === 'no_destructive_replay') return undefined;
-  return {
-    step: found.fact.command ?? found.fact.name,
-    reason: found.decision.reason ?? 'constraint_rejected',
-  };
 }

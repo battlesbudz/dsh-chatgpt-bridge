@@ -49,11 +49,13 @@ test('resolveInsideWorkspace uses the same compare rule as workspace matching', 
   assert.equal(resolveInsideWorkspace(WORKSPACE, trailing), undefined);
   assert.equal(resolveInsideWorkspace(trailing, WORKSPACE), undefined);
   assert.equal(normalizePath(trailing), normalizePath(WORKSPACE));
+  assert.equal(normalizePath('D:/workspace/sub'), normalizePath('D:\\workspace\\sub'));
   // Traversal that normalizes back to the root is the root, not a child.
   assert.equal(resolveInsideWorkspace(join(WORKSPACE, 'sub', '..'), WORKSPACE), undefined);
   if (isWin) {
     assert.equal(resolveInsideWorkspace(WORKSPACE, WORKSPACE.toLowerCase()), undefined);
     assert.equal(normalizePath(`${WORKSPACE}\\`), normalizePath(WORKSPACE.toLowerCase()));
+    assert.equal(normalizePath('D:/repo/path/'), normalizePath('d:\\repo\\path'));
   }
 });
 

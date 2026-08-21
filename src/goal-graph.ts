@@ -330,3 +330,12 @@ export function describeBlocked(input: BlockedDescribeInput): BlockedInfo | unde
     independent_steps_available: independent,
   };
 }
+
+export const KNOWN_ACTION_KINDS = new Set<string>([
+  'git_push', 'git_tag', 'npm_publish', 'github_release', 'git_worktree_add', 'npm_pack',
+]);
+
+export function deferredKindsOf(deferredStepIds?: readonly string[]): ActionKind[] {
+  if (deferredStepIds === undefined) return [];
+  return deferredStepIds.filter((id): id is ActionKind => KNOWN_ACTION_KINDS.has(id));
+}

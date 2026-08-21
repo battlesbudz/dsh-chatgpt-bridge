@@ -3,7 +3,8 @@
  * Not a second execution engine: DSH session events remain the authority
  * for what actually ran.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ActionKind } from './goal-facts.js';
 import { redactValue } from './redact.js';
@@ -374,7 +375,19 @@ export function fileStoreIo(dir: string): GoalStoreIo {
     },
     write(sessionId, json) {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, `${safeSessionFileId(sessionId)}.json`), json, 'utf8');
+      const target = join(dir, `${safeSessionFileId(sessionId)}.json`);
+      const tmp = join(dir, `${safeSessionFileId(sessionId)}.${process.pid}.${randomUUID()}.tmp`);
+      try {
+        writeFileSync(tmp, json, 'utf8');
+        renameSync(tmp, target);
+      } catch (error) {
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          // best-effort
+        }
+        throw error;
+      }
     },
   };
 }

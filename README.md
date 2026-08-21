@@ -2,14 +2,27 @@
 
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. v0.3.0 — *Goal Control Plane*. The bridge only
+Protocol**. v0.4.0 — *Native Settings & Process Runtime Manager*.
+The v0.3.0 Goal Control Plane is unchanged. The bridge only
 *connects* — DSH keeps its own session log, agent loop, tools, skills,
 subagents, workflows, approvals, sandbox and workspace security model. It is a
 standalone DSH plugin: **zero DSH core modifications**.
 
+> **Direction of control: ChatGPT Web → secure MCP tunnel → this bridge → DSH.**
+> This project lets the **ChatGPT web app call and supervise your local or
+> self-hosted DSH**. It does not make DSH call ChatGPT, and it does not route
+> DSH model requests through ChatGPT.
+
 > Self-hosted / dogfooding development: implemented against the installed DeepSeek
 > Harness source (`0.1.0-rc.6`) and verified end-to-end against a live local DSH
 > runtime with the official MCP SDK client.
+
+## Real-world setup
+
+The screenshot below is from a real DSH Web installation with the bridge and
+OpenAI tunnel connected. Sensitive values are masked.
+
+![DSH Web ChatGPT Bridge settings running in a real installation](assets/screenshots/06-native-settings-real-use.png)
 
 ---
 
@@ -109,7 +122,7 @@ remote MCP client and cannot reach it directly.
 ## 5. Scan / refresh tools
 
 After the MCP connection is established, **scan / refresh the MCP tools** in
-ChatGPT. v0.3.0 exposes **15 tools**, and `dsh_update_goal` must be present
+ChatGPT. The bridge exposes **15 tools**, and `dsh_update_goal` must be present
 (it is the 15th). If the tool list looks stale, refresh/rescan the connector
 (see [Tool count is stale](#tool-count-is-stale--dsh_update_goal-missing-after-upgrade)).
 
@@ -129,7 +142,7 @@ Expected:
 
 ```text
 health = ok
-bridge version = 0.3.0
+bridge version = 0.4.0
 ```
 
 Then a minimal Goal Supervision example (still read-only):
@@ -140,6 +153,81 @@ Then a minimal Goal Supervision example (still read-only):
 README，constraints 使用 {"read_only": true}。然后反复调用 dsh_wait_goal
 直到 terminal，最后只汇报 health、goal revision 和总结，不修改任何文件。
 ```
+
+---
+
+## Native Settings & Tunnel Runtime (v0.4.0)
+
+The DSH Web **Settings → ChatGPT Bridge** page manages the whole Tunnel story
+in the GUI: configure the OpenAI tunnel, save the Runtime API key, start /
+stop / restart a plugin-owned `tunnel-client`, read live status, run layered
+diagnostics and inspect redacted logs. No hand-written PowerShell required.
+
+- **Runtime config** lives in `$DSH_HOME/chatgpt-bridge/runtime-config.json`
+  (separate from the Bridge ConfigSchema). Secrets live in
+  `$DSH_HOME/chatgpt-bridge/secrets/` and are referenced by the generated
+  profile only as `file:` references.
+- **Management API**: loopback-only `/_dsh/chatgpt-bridge/*` on the DSH web
+  server, with Host/Origin/Content-Type/custom-header CSRF checks. No CORS
+  wildcard.
+- **Runtime ownership**: `tunnel-client run` is spawned with `shell:false`,
+  tracked by ProcessIdentity. Every destructive termination — including the
+  graceful SIGTERM and the subsequent Windows `taskkill /T /F` or POSIX
+  `SIGKILL` — runs only after a fresh identity verification
+  (**PID + normalized executable path + process start time**). A mismatch,
+  unreadable probe, thrown probe, or missing process fails closed: the
+  plugin never hard-kills a PID that may have been reused. Startup health /
+  ready timeout cleanup uses the same path; there is no “just spawned”
+  bypass. The per-launch `runtimeInstanceId` is manager metadata, not an
+  OS-verified marker. DSH unload stops the plugin-owned runtime. The Bridge
+  bearer auth is preserved end-to-end through `mcp.extra_headers` with a
+  `file:` secret ref. Persistent runtime recovery (PID adoption after
+  crash), Native Runtime, and runtime hot-switching are **not** in v0.4.0.
+- **Lifecycle latch**: lifecycle/ownership failures
+  (`stale-process-identity`, `start-time-mismatch`, `unknown-start-time`,
+  `tunnel-stop-timeout`) remain latched until shutdown ownership is explicitly
+  resolved (confirmed stop, confirmed cleanup, successful fresh start);
+  health/readiness polling alone cannot restore `overall` to `ready`.
+- **Status probe provenance**: runtime status probe failures (including
+  `RuntimeManager.diagnostics()` and `refresh()`) are treated as unknown
+  state, not confirmed process exit; ownership is retained (`owned=true`)
+  and surfaced as `status-failed` until the runtime is successfully
+  observed as stopped/exited or explicitly stopped. A failed probe never
+  starts a second tunnel.
+- **Diagnostics**: the page's *Run diagnostics* invokes the real
+  `tunnel-client doctor --profile-file ... --json` through the runtime's
+  `doctor()` alongside the layered bridge / process / key / proxy checks.
+  Steps are normalized and redacted; a doctor failure or a thrown status
+  probe is a structured failed step and never crashes the management API.
+- **Backend**: v0.4.0 defaults to `ProcessTunnelRuntime` (plugin-owned
+  process supervision, DSH-native Settings, Auto Start, ownership-safe
+  lifecycle, status/health/diagnostics). The `TunnelRuntime` interface is
+  the future Native Runtime abstraction seam; v0.4.0 does not implement
+  `NativeManagedTunnelRuntime` or process↔native hot switching. Settings
+  changes take effect on the next user Restart.
+- **tunnel-client**: detected from the configured executable path, then
+  `PATH`, then a short list of well-known install directories (including
+  `D:\Application\tunnel-client\` on Windows), then the image path of an
+  already-running `tunnel-client` (as a hint only — the plugin never takes
+  over that process). Official tunnel-client profiles
+  (`%APPDATA%\tunnel-client\*.yaml` / `~/.config/tunnel-client/*.yaml`)
+  supply Tunnel ID and control-plane URL when our own config is empty.
+  Secret values are never imported or returned. If nothing is found, the
+  page shows *Not installed*. No automatic download/install is performed.
+
+### Client bundle build
+
+```bash
+npm run build          # server (tsc) + client (scripts/build-client.mjs)
+npm run typecheck
+npm test
+```
+
+The client bundle (`lib/client.js`) is produced in the DSH module-loader
+format (`window.__ModuleLoader__.load({ id, factory })`) and declared via the
+`dsh.client` manifest in `package.json`. The factory acquires React with
+`require('react')` from the DSH ModuleLoader; it does not depend on a
+browser-global React object.
 
 ---
 
@@ -178,7 +266,7 @@ stream in real time.
 ### Tool count is stale / dsh_update_goal missing after upgrade
 
 Re-scan / refresh the MCP tools on the ChatGPT side after upgrading the
-plugin and restarting the profile. v0.3.0 exposes **15 tools**;
+plugin and restarting the profile. The bridge exposes **15 tools**;
 `dsh_update_goal` is the 15th.
 
 ### Port 3456 already in use
@@ -224,7 +312,7 @@ After completing Quick Start steps 1–3:
 4. Ask ChatGPT to call `dsh_health`.
 5. Confirm:
    - `health = ok`
-   - `bridge version = 0.3.0`
+   - `bridge version = 0.4.0`
    - **tool count = 15**
    - `dsh_update_goal` exists in the tool list
 6. Optionally call `dsh_list_workspaces` to confirm your workspace is
@@ -299,7 +387,7 @@ The Quick Start uses `dsh plugin --profile web add dsh-chatgpt-bridge`. If
 
 ```bash
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile web add dsh-chatgpt-bridge
-# published: ... add dsh-chatgpt-bridge@0.3.0
+# published: ... add dsh-chatgpt-bridge@0.4.0
 
 # boot ONE process — Web :3080 and MCP :3456
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile web
@@ -315,7 +403,7 @@ and can be resumed later, but DSH Web `:3080` will not stream them in real
 time.
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.3.0
+pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.4.0
 pnpm dlx @deepseek-ai/dsh@0.1.0-rc.6 --profile chatgpt-bridge
 ```
 
