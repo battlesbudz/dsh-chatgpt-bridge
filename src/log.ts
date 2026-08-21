@@ -61,3 +61,33 @@ export function createBridgeLogger(options: {
     error: (m, p) => emit('error', m, p),
   };
 }
+
+/** Control-plane logger: writes redacted NDJSON under DSH_HOME/chatgpt-bridge/logs, forwarded to cordis. */
+export function createControlLogger(
+  dshHome: string,
+  cordis?: { info(m: string): void; warn(m: string): void; error(m: string): void },
+): { info(m: string): void; warn(m: string): void; error(m: string): void } {
+  const dir = join(dshHome || process.cwd(), 'chatgpt-bridge', 'logs');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    // logging must never break the plugin
+  }
+  const file = join(dir, 'manager.ndjson');
+  const emit = (level: 'info' | 'warn' | 'error', message: string): void => {
+    const line = redactMessage(message);
+    try {
+      appendFileSync(file, JSON.stringify({ time: new Date().toISOString(), level, message: line }) + '\n');
+    } catch {
+      // best-effort
+    }
+    if (level === 'error') cordis?.error(line);
+    else if (level === 'warn') cordis?.warn(line);
+    else cordis?.info(line);
+  };
+  return {
+    info: (message) => emit('info', message),
+    warn: (message) => emit('warn', message),
+    error: (message) => emit('error', message),
+  };
+}

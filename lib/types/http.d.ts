@@ -5,6 +5,7 @@ export interface HttpServerHandle {
     url: string;
     close(): Promise<void>;
 }
+export declare const MAX_MCP_BODY_BYTES: number;
 export declare function startHttpServer(createSessionServer: () => McpServer, options: {
     host: string;
     port: number;

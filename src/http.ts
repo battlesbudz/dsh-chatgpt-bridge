@@ -31,11 +31,22 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(left, right);
 }
 
+export const MAX_MCP_BODY_BYTES = 4 * 1024 * 1024; // 4MB
+
 /** Read and parse a JSON request body (empty bodies yield undefined). */
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
+function readJsonBody(req: IncomingMessage, maxBytes = MAX_MCP_BODY_BYTES): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(new Error('payload-too-large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (raw.trim() === '') return resolve(undefined);
@@ -76,8 +87,15 @@ export function startHttpServer(
       return match !== null && safeEqual(match[1], options.authToken);
     };
 
+    interface SessionEntry {
+      transport: StreamableHTTPServerTransport;
+      server: McpServer;
+      lastActiveAt: number;
+    }
     /** One MCP session: its transport plus the per-session server instance. */
-    const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer }>();
+    const sessions = new Map<string, SessionEntry>();
+    const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+    const MAX_SESSIONS = 128;
 
     const httpServer = createServer(async (req, res) => {
       try {
@@ -105,6 +123,7 @@ export function startHttpServer(
         const sessionId = req.headers['mcp-session-id'];
         const existing = typeof sessionId === 'string' && sessionId !== '' ? sessions.get(sessionId) : undefined;
         if (existing !== undefined) {
+          existing.lastActiveAt = Date.now();
           const parsedBody = req.method === 'POST' ? await readJsonBody(req) : undefined;
           await existing.transport.handleRequest(req, res, parsedBody);
           return;
@@ -115,15 +134,26 @@ export function startHttpServer(
           sendJson(res, sessionId !== undefined ? 404 : 400, { error: 'session-not-found' });
           return;
         }
+        // Sweep idle or overflow sessions before creating a new one
+        if (sessions.size >= MAX_SESSIONS) {
+          const now = Date.now();
+          for (const [id, s] of [...sessions.entries()]) {
+            if (now - s.lastActiveAt > SESSION_IDLE_TIMEOUT_MS || sessions.size >= MAX_SESSIONS) {
+              sessions.delete(id);
+              void s.transport.close().catch(() => {});
+              void s.server.close().catch(() => {});
+            }
+          }
+        }
         // Fresh MCP session: one transport + one server instance.
-        let entry: { transport: StreamableHTTPServerTransport; server: McpServer } | undefined;
+        let entry: SessionEntry | undefined;
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id: string) => {
             if (entry !== undefined) sessions.set(id, entry);
           },
         });
-        entry = { transport, server: createSessionServer() };
+        entry = { transport, server: createSessionServer(), lastActiveAt: Date.now() };
         await entry.server.connect(transport);
         transport.onclose = () => {
           const id = transport.sessionId;
@@ -134,8 +164,12 @@ export function startHttpServer(
         await transport.handleRequest(req, res, parsedBody);
       } catch (error) {
         log.error(`MCP HTTP request failed: ${error instanceof Error ? error.message : String(error)}`);
-        if (!res.headersSent) sendJson(res, 500, { error: 'internal-error' });
-        else res.destroy();
+        if (!res.headersSent) {
+          const isLarge = error instanceof Error && error.message === 'payload-too-large';
+          sendJson(res, isLarge ? 413 : 500, { error: isLarge ? 'payload-too-large' : 'internal-error' });
+        } else {
+          res.destroy();
+        }
       }
     });
 

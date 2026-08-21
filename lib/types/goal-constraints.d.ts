@@ -45,3 +45,7 @@ export declare function findConstraintViolation(facts: GoalFacts, constraints: G
     decision: ConstraintDecision;
 } | undefined;
 export declare function parseConstraints(value: unknown): GoalConstraints;
+export declare function findPostHocViolation(facts: GoalFacts, constraints: GoalConstraints): {
+    step: string;
+    reason: string;
+} | undefined;

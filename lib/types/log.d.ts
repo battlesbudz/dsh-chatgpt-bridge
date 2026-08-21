@@ -22,3 +22,13 @@ export declare function createBridgeLogger(options: {
         debug?(m: string): void;
     };
 }): BridgeLogger;
+/** Control-plane logger: writes redacted NDJSON under DSH_HOME/chatgpt-bridge/logs, forwarded to cordis. */
+export declare function createControlLogger(dshHome: string, cordis?: {
+    info(m: string): void;
+    warn(m: string): void;
+    error(m: string): void;
+}): {
+    info(m: string): void;
+    warn(m: string): void;
+    error(m: string): void;
+};

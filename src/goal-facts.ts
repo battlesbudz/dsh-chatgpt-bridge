@@ -281,3 +281,34 @@ export function successfulKinds(facts: GoalFacts): Set<ActionKind> {
   }
   return ok;
 }
+
+export function commandForCall(
+  events: readonly { type: string; data?: unknown }[] | undefined,
+  callId?: string,
+): string | undefined {
+  if (events === undefined || callId === undefined) return undefined;
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data === undefined || data.callId !== callId) continue;
+    const raw = typeof data.arguments === 'string' ? data.arguments : '';
+    const args = raw === '' ? undefined : parseArgsJson(raw);
+    return args === undefined ? undefined : extractCommand(args);
+  }
+  return undefined;
+}
+
+export function changedFileCountOf(events: readonly { type: string; data?: unknown }[] | undefined): number {
+  if (events === undefined) return 0;
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data === undefined || typeof data.arguments !== 'string') continue;
+    const args = parseArgsJson(data.arguments);
+    if (args === undefined) continue;
+    const path = extractFilePath(args);
+    if (path !== undefined) seen.add(path);
+  }
+  return seen.size;
+}

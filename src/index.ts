@@ -7,9 +7,11 @@ import { Context } from '@deepseek-ai/cordis';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Bridge } from './bridge.js';
 import { ConfigSchema, resolveConfig, type BridgeConfigInput, type ResolvedBridgeConfig } from './config.js';
-import { createBridgeLogger } from './log.js';
+import { createBridgeLogger, createControlLogger } from './log.js';
 import { createMcpServer } from './mcp.js';
 import { startHttpServer, type HttpServerHandle } from './http.js';
+import { RuntimeManager } from './control/runtime-manager.js';
+import { createManagementApi } from './control/routes.js';
 
 export const name = 'chatgpt-bridge';
 
@@ -34,6 +36,30 @@ export function apply(ctx: Context, config: BridgeConfigInput): void {
 
   const bridge = new Bridge(ctx, cfg, log);
   bridge.start();
+
+  // v0.4.0 Control Plane: runtime manager + management API (web profile only).
+  // Bridge stays the data plane; the manager only probes the bridge endpoint.
+  const controlLog = createControlLogger(cfg.dshHome, {
+    info: (message) => ctx.logger.info(message),
+    warn: (message) => ctx.logger.warn(message),
+    error: (message) => ctx.logger.error(message),
+  });
+  const runtimeManager = new RuntimeManager({
+    dshHome: cfg.dshHome,
+    bridge: {
+      url: `http://127.0.0.1:${cfg.port}/mcp`,
+      token: cfg.authToken,
+      authMode: cfg.authMode,
+    },
+    logger: controlLog,
+  });
+  runtimeManager.activate();
+  const managementApi = createManagementApi(runtimeManager, { dshHome: cfg.dshHome });
+  ctx.inject(['webServer'], (webCtx) => {
+    if (webCtx.webServer === undefined) return () => {};
+    const disposeApi = managementApi.register(webCtx.webServer);
+    return () => disposeApi();
+  });
 
   const mcpServer = createMcpServer(bridge, cfg, log);
   let stdioTransport: StdioServerTransport | undefined;
@@ -61,6 +87,9 @@ export function apply(ctx: Context, config: BridgeConfigInput): void {
   // actually gone before the plugin row finishes unloading.
   ctx.effect(() => async () => {
     log.info('bridge shutting down: closing MCP server and transports');
+    // v0.4.0: stop the plugin-owned tunnel-client (if any) before teardown so
+    // DSH unload never leaves an orphan tunnel runtime.
+    await runtimeManager.dispose();
     if (httpReady !== undefined) {
       try {
         const handle = await httpReady;
