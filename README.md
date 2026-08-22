@@ -1,5 +1,7 @@
 # dsh-chatgpt-bridge
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/jiezeng2004-design-dsh-chatgpt-bridge-14d0zo)](https://m8ven.ai/mcp/jiezeng2004-design-dsh-chatgpt-bridge-14d0zo)
+
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
 Protocol**. v0.4.1 — *DSH 0.1.1-rc.1 Compatibility Release & Native Settings*.
