@@ -19,6 +19,29 @@ standalone DSH plugin: **zero DSH core modifications**.
 > Harness and verified end-to-end against live local DSH
 > runtimes (verified up to `0.1.1-rc.1`) with the official MCP SDK client.
 
+## Project status / maintenance
+
+This project is actively maintained as an independent DSH plugin. The primary
+maintainer is [`jiezeng2004-design`](https://github.com/jiezeng2004-design).
+Ongoing maintenance includes tracking DeepSeek Harness upstream compatibility,
+preparing compatibility releases, preserving MCP tool/schema behavior, testing
+runtime lifecycle and security-sensitive tunnel changes, and keeping install
+and operational documentation current.
+
+The latest public release is `dsh-chatgpt-bridge@0.4.1`, verified against DSH
+`0.1.1-rc.1`. Releases, compatibility updates and regression testing are part
+of the project's continuing maintenance responsibilities.
+
+## Ecosystem / distribution
+
+- Source and releases: [GitHub](https://github.com/jiezeng2004-design/dsh-chatgpt-bridge)
+- Published package: [npm](https://www.npmjs.com/package/dsh-chatgpt-bridge)
+- MCP directory listings: [M8ven](https://m8ven.ai/mcp/jiezeng2004-design-dsh-chatgpt-bridge-14d0zo) and [Glama](https://glama.ai/mcp/servers/jiezeng2004-design/dsh-chatgpt-bridge/schema)
+- DSH ecosystem listings: [dshbase](https://dshbase.com/plugins/dsh-chatgpt-bridge/) and [DSHarness](https://dsharness.org/plugin/jiezeng2004-design/dsh-chatgpt-bridge)
+
+Directory labels describe each directory's own checks; they are not security
+audits, endorsements or evidence of a particular number of active users.
+
 ## Real-world setup
 
 The screenshot below is from a real DSH Web installation with the bridge and
@@ -144,7 +167,7 @@ Expected:
 
 ```text
 health = ok
-bridge version = 0.4.0
+bridge version = 0.4.1
 ```
 
 Then a minimal Goal Supervision example (still read-only):
@@ -314,7 +337,7 @@ After completing Quick Start steps 1–3:
 4. Ask ChatGPT to call `dsh_health`.
 5. Confirm:
    - `health = ok`
-   - `bridge version = 0.4.0`
+   - `bridge version = 0.4.1`
    - **tool count = 15**
    - `dsh_update_goal` exists in the tool list
 6. Optionally call `dsh_list_workspaces` to confirm your workspace is
@@ -765,13 +788,16 @@ DSH core modifications: **0**.
   `dsh_list_workspaces`. The automated dogfood/resume flows additionally use
   the official MCP SDK client against the same Streamable HTTP endpoint.
 
-## DSH compatibility
+## Compatibility matrix
 
-| DSH Version | Status | Notes |
-| --- | --- | --- |
-| **0.1.1-rc.1** | **Verified** | Primary baseline for `dsh-chatgpt-bridge@0.4.1` (all tests, types, and integration gates green) |
-| 0.1.0-rc.7 | Compatible | Full compatibility with previous patch/fixes |
-| 0.1.0-rc.6 | Previously Verified | Initial v0.4.0 baseline |
+| dsh-chatgpt-bridge | DeepSeek Harness | Status | Evidence / notes |
+| --- | --- | --- | --- |
+| `v0.4.1` | `0.1.1-rc.1` | Current public verified baseline | Compatibility release; tag manifest and regression gates target rc.1 |
+| `v0.4.0` | `0.1.0-rc.6` | Historical verified baseline | Native Settings & Tunnel Runtime Manager release; tag manifest targets rc.6 |
+| `v0.4.0` | `0.1.0-rc.7` | Documented compatible | The v0.4.0 CHANGELOG records rc.7-specific Native Settings fixes |
+| `v0.3.0` | `0.1.0-rc.6` | Historical | Goal Control Plane release; tag manifest targets rc.6 |
+| `v0.2.0` | `0.1.0-rc.6` | Historical | Tag manifest targets rc.6 |
+| `v0.1.0` | `0.1.0-rc.6` | Historical | Initial release; tag manifest targets rc.6 |
 
 - Node >= 22.
 - Uses only public plugin seams; zero DSH core files are modified.
