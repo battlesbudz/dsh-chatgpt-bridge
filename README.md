@@ -44,6 +44,29 @@ automated and live-runtime evidence boundary.
 Directory labels describe each directory's own checks; they are not security
 audits or evidence of a particular number of active users.
 
+## Project status / maintenance
+
+This project is actively maintained as an independent DSH plugin. The primary
+maintainer is [`jiezeng2004-design`](https://github.com/jiezeng2004-design).
+Ongoing maintenance includes tracking DeepSeek Harness upstream compatibility,
+preparing compatibility releases, preserving MCP tool/schema behavior, testing
+runtime lifecycle and security-sensitive tunnel changes, and keeping install
+and operational documentation current.
+
+The latest public release is `dsh-chatgpt-bridge@0.4.1`, verified against DSH
+`0.1.1-rc.1`. Releases, compatibility updates and regression testing are part
+of the project's continuing maintenance responsibilities.
+
+## Ecosystem / distribution
+
+- Source and releases: [GitHub](https://github.com/jiezeng2004-design/dsh-chatgpt-bridge)
+- Published package: [npm](https://www.npmjs.com/package/dsh-chatgpt-bridge)
+- MCP directory listings: [M8ven](https://m8ven.ai/mcp/jiezeng2004-design-dsh-chatgpt-bridge-14d0zo) and [Glama](https://glama.ai/mcp/servers/jiezeng2004-design/dsh-chatgpt-bridge/schema)
+- DSH ecosystem listings: [dshbase](https://dshbase.com/plugins/dsh-chatgpt-bridge/) and [DSHarness](https://dsharness.org/plugin/jiezeng2004-design/dsh-chatgpt-bridge)
+
+Directory labels describe each directory's own checks; they are not security
+audits, endorsements or evidence of a particular number of active users.
+
 ## Real-world setup
 
 The screenshot below is from a real DSH Web installation with the bridge and
