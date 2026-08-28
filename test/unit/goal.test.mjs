@@ -223,6 +223,7 @@ test('Test A — minimal supervised context forbids native get_goal', () => {
   assert.match(injected, /unnecessary control-plane query/);
   assert.match(injected, /Do not call the agent-native get_goal/);
   assert.match(injected, /只等待 35 秒/);
+  assert.match(injected, /single Goal card: "Goal rev 1"/);
   assert.equal(SUPERVISED_GOAL_AUTHORITY.includes('get_goal'), true);
 });
 
@@ -246,4 +247,7 @@ test('Test C — revision 2 injection stays the authoritative [Goal]', () => {
   assert.match(injected, /goal_id=goal-session-rev/);
   assert.match(injected, /revision=2/);
   assert.match(injected, /Goal revision: 2/);
+  assert.match(injected, /single Goal card: "Goal rev 2"/);
+  assert.match(injected, /not a new session, agent, or Goal/);
+  assert.match(injected, /Folded history:/);
 });

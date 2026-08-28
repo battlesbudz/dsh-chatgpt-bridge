@@ -6,7 +6,7 @@
 import { Context } from '@deepseek-ai/cordis';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Bridge } from './bridge.js';
-import { ConfigSchema, resolveConfig, type BridgeConfigInput, type ResolvedBridgeConfig } from './config.js';
+import { bridgeHttpUrl, ConfigSchema, resolveConfig, type BridgeConfigInput, type ResolvedBridgeConfig } from './config.js';
 import { createBridgeLogger, createControlLogger } from './log.js';
 import { createMcpServer } from './mcp.js';
 import { startHttpServer, type HttpServerHandle } from './http.js';
@@ -47,7 +47,7 @@ export function apply(ctx: Context, config: BridgeConfigInput): void {
   const runtimeManager = new RuntimeManager({
     dshHome: cfg.dshHome,
     bridge: {
-      url: `http://127.0.0.1:${cfg.port}/mcp`,
+      url: bridgeHttpUrl(cfg.host, cfg.port),
       token: cfg.authToken,
       authMode: cfg.authMode,
     },

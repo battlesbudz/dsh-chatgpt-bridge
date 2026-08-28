@@ -1,8 +1,8 @@
 /**
- * MCP server surface: the fifteen dsh_* tools ChatGPT calls. Every tool maps
- * onto a Bridge operation; nothing here reaches the filesystem, the shell,
- * or DSH internals directly. Outputs are JSON text blocks; failures are
- * reported as isError results with { error: { code, message } }.
+ * MCP server surface: data-plane and control-plane dsh_* tools ChatGPT calls.
+ * Every tool maps onto a Bridge operation; nothing here reaches the filesystem,
+ * the shell, or DSH internals directly. Outputs are JSON text blocks; failures
+ * are reported as isError results with { error: { code, message } }.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -18,10 +18,19 @@ const actionClassSchema = z.enum([
   'filesystem.write',
   'filesystem.scan',
   'process.exec',
+  'process.spawn',
+  'git.read',
   'git.mutate',
   'npm.publish',
   'github.release',
   'network',
+  'credentials.metadata',
+  'workspace.read',
+  'workspace.write',
+  'temp.read',
+  'temp.write',
+  'external_path.read',
+  'external_path.write',
 ]);
 
 const constraintSchema = z.object({
@@ -39,7 +48,7 @@ function textResult(value: unknown): { content: { type: 'text'; text: string }[]
 function errorResult(error: unknown): { content: { type: 'text'; text: string }[]; isError: true } {
   if (error instanceof BridgeError) {
     return {
-      content: [{ type: 'text', text: JSON.stringify({ error: { code: error.code, message: error.message } }, null, 2) }],
+      content: [{ type: 'text', text: JSON.stringify({ error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) } }, null, 2) }],
       isError: true,
     };
   }
@@ -244,6 +253,161 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
   );
 
   server.registerTool(
+    'dsh_create_goal',
+    {
+      title: 'Create a supervised DSH goal',
+      description:
+        'Create a supervised DSH goal. If an equivalent active Goal already exists on the workspace, ' +
+        'it is reused idempotently without bumping revision. Returns continuation_required.',
+      inputSchema: z.object({
+        workspace: z.string().min(1).describe('Workspace id, path, or title from dsh_list_workspaces'),
+        goal: z.string().min(1).max(20000).describe('The completion target for DSH'),
+        plan: z.string().max(20000).optional().describe('Optional execution plan DSH should follow'),
+        request_id: z.string().min(1).max(200).optional().describe('Idempotency key'),
+        execution_mode: z.enum(['standard', 'minimal', 'strict']).optional(),
+        constraints: constraintSchema.optional(),
+        workspace_lock_override: z.boolean().optional()
+          .describe('Take over an existing mutable workspace lock. Concurrent writers are rejected by default.'),
+      }),
+    },
+    safe(async (args: {
+      workspace: string;
+      goal: string;
+      plan?: string;
+      request_id?: string;
+      execution_mode?: 'standard' | 'minimal' | 'strict';
+      constraints?: unknown;
+      workspace_lock_override?: boolean;
+    }) => bridge.createGoal({ ...args, constraints: parseConstraints(args.constraints) })),
+  );
+
+  server.registerTool(
+    'dsh_revise_goal',
+    {
+      title: 'Revise a supervised DSH goal',
+      description:
+        'Substantive update to an existing Goal (goal/plan/mode/constraints). Increments revision with optimistic locking (expected_revision).',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        goal: z.string().max(20000).optional(),
+        plan: z.string().max(20000).optional(),
+        expected_revision: z.number().int().min(1).optional().describe('Optimistic lock on current Goal revision'),
+        execution_mode: z.enum(['standard', 'minimal', 'strict']).optional(),
+        constraints: constraintSchema.optional(),
+        revision_reason: z.string().max(200).optional(),
+        request_id: z.string().min(1).max(200).optional(),
+        workspace_lock_override: z.boolean().optional().describe('Take over an existing mutable workspace lock.'),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      goal?: string;
+      plan?: string;
+      expected_revision?: number;
+      execution_mode?: 'standard' | 'minimal' | 'strict';
+      constraints?: unknown;
+      revision_reason?: string;
+      request_id?: string;
+      workspace_lock_override?: boolean;
+    }) => bridge.reviseGoal({ ...args, constraints: parseConstraints(args.constraints) })),
+  );
+
+  server.registerTool(
+    'dsh_pause_goal',
+    {
+      title: 'Pause a supervised DSH goal',
+      description: 'Pause active turn and keep durable checkpoint without losing state.',
+      inputSchema: z.object({ session_id: z.string().min(1) }),
+    },
+    safe(async (args: { session_id: string }) => bridge.pauseGoal(args.session_id)),
+  );
+
+  server.registerTool(
+    'dsh_resume_goal',
+    {
+      title: 'Resume a paused/deferred DSH goal',
+      description: 'Resume from checkpoint without re-running completed steps.',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        resume_steps: z.array(z.string().min(1)).optional(),
+        request_id: z.string().min(1).max(200).optional(),
+        workspace_lock_override: z.boolean().optional().describe('Take over an existing mutable workspace lock.'),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      resume_steps?: string[];
+      request_id?: string;
+      workspace_lock_override?: boolean;
+    }) => bridge.resumeGoal(args.session_id, args.resume_steps, args.request_id, args.workspace_lock_override)),
+  );
+
+  server.registerTool(
+    'dsh_retry_step',
+    {
+      title: 'Retry a blocked or failed step',
+      description: 'Retry a specific blocked or failed step under the same identity, clearing stale blockers.',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        step_id: z.string().min(1),
+        request_id: z.string().min(1).max(200).optional(),
+        workspace_lock_override: z.boolean().optional().describe('Take over an existing mutable workspace lock.'),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      step_id: string;
+      request_id?: string;
+      workspace_lock_override?: boolean;
+    }) => bridge.retryStep(args.session_id, args.step_id, args.request_id, args.workspace_lock_override)),
+  );
+
+  server.registerTool(
+    'dsh_rerun_step',
+    {
+      title: 'Rerun or re-verify a step',
+      description: 'Explicitly rerun a step with a fresh attempt even if previously completed.',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        step_id: z.string().min(1),
+        request_id: z.string().min(1).max(200).optional(),
+        workspace_lock_override: z.boolean().optional().describe('Take over an existing mutable workspace lock.'),
+      }),
+    },
+    safe(async (args: {
+      session_id: string;
+      step_id: string;
+      request_id?: string;
+      workspace_lock_override?: boolean;
+    }) => bridge.rerunStep(args.session_id, args.step_id, args.request_id, args.workspace_lock_override)),
+  );
+
+  server.registerTool(
+    'dsh_wait_until_action_required',
+    {
+      title: 'Long wait on supervised Goal until action is required',
+      description:
+        'Server-side long wait: returns only when human approval/question, error, or terminal completion is reached, avoiding high-frequency polling.',
+      inputSchema: z.object({
+        session_id: z.string().min(1),
+        wait_seconds: z.number().int().min(1).max(300).optional().describe('Max seconds to wait (default 120, max 300)'),
+      }),
+    },
+    safe(async (args: { session_id: string; wait_seconds?: number }) =>
+      bridge.waitUntilActionRequired(args.session_id, args.wait_seconds)),
+  );
+
+  server.registerTool(
+    'dsh_credential_status',
+    {
+      title: 'Check credential availability (secret-safe)',
+      description: 'Inspect provider credential availability and source without returning raw secret tokens or keys.',
+      inputSchema: z.object({}),
+    },
+    safe(async () => bridge.getCredentialStatus()),
+  );
+
+  server.registerTool(
     'dsh_start_goal',
     {
       title: 'Start a supervised DSH goal',
@@ -262,9 +426,12 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
         plan: z.string().max(20000).optional().describe('Optional execution plan DSH should follow'),
         session_id: z.string().optional().describe('Continue this existing DSH session; omit to create a new one'),
         request_id: z.string().min(1).max(200).optional().describe('Idempotency key for connector retries in this process'),
+        expected_revision: z.number().int().min(1).optional().describe('Optional optimistic lock on current Goal revision'),
         execution_mode: z.enum(['standard', 'minimal', 'strict']).optional()
           .describe('standard (default), minimal (necessary actions only), or strict (follow plan/constraints)'),
         constraints: constraintSchema.optional().describe('Structured Goal constraints; can only tighten DSH policy'),
+        workspace_lock_override: z.boolean().optional()
+          .describe('Take over an existing mutable workspace lock. Concurrent writers are rejected by default.'),
       }),
     },
     safe(async (args: {
@@ -273,8 +440,10 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       plan?: string;
       session_id?: string;
       request_id?: string;
+      expected_revision?: number;
       execution_mode?: 'standard' | 'minimal' | 'strict';
       constraints?: unknown;
+      workspace_lock_override?: boolean;
     }) => bridge.startGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 
@@ -295,6 +464,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
           .describe('revise (default), defer a step, or resume deferred/blocked work'),
         goal: z.string().max(20000).optional().describe('Replacement goal text (revise)'),
         plan: z.string().max(20000).optional().describe('Replacement plan'),
+        expected_revision: z.number().int().min(1).optional().describe('Optimistic lock on current Goal revision'),
         execution_mode: z.enum(['standard', 'minimal', 'strict']).optional(),
         constraints: constraintSchema.optional(),
         defer_steps: z.array(z.string().min(1)).optional()
@@ -303,6 +473,7 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
           .describe('Step ids/kinds to resume; omit on action=resume to resume all deferred steps'),
         revision_reason: z.string().max(200).optional(),
         request_id: z.string().min(1).max(200).optional(),
+        workspace_lock_override: z.boolean().optional().describe('Take over an existing mutable workspace lock.'),
       }),
     },
     safe(async (args: {
@@ -310,12 +481,14 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
       action?: 'revise' | 'defer' | 'resume';
       goal?: string;
       plan?: string;
+      expected_revision?: number;
       execution_mode?: 'standard' | 'minimal' | 'strict';
       constraints?: unknown;
       defer_steps?: string[];
       resume_steps?: string[];
       revision_reason?: string;
       request_id?: string;
+      workspace_lock_override?: boolean;
     }) => bridge.updateGoal({ ...args, constraints: parseConstraints(args.constraints) })),
   );
 

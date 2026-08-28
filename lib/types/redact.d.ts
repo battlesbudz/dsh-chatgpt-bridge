@@ -3,6 +3,8 @@
  * can carry caller or DSH error text passes through these so credentials,
  * tokens, cookies and API keys never leak into logs or MCP results.
  */
+/** True when text contains a secret-shaped token, key assignment, or bearer value. */
+export declare function containsSecret(text: string): boolean;
 /** Redact secret-shaped substrings from one text value. */
 export declare function redactText(text: string): string;
 /**

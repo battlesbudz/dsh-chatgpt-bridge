@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Real MCP dogfood for the v0.3.0 Goal Control Plane.
+ * Real MCP dogfood for the v0.5.0 Control Plane Reliability release.
  *
  * Dogfood A — minimal 35-second Goal (no workspace scan, no file writes).
  * Dogfood B — mock release DAG: block one branch, defer it, finish the
@@ -49,10 +49,10 @@ async function waitLoop(client, sessionId, timeoutMs = 180000) {
   let last;
   let polls = 0;
   while (Date.now() < deadline) {
-    const { parsed, isError } = await call(client, 'dsh_wait_goal', { session_id: sessionId, wait_seconds: 25 });
+    const { parsed, isError } = await call(client, 'dsh_wait_until_action_required', { session_id: sessionId, wait_seconds: 120 });
     last = parsed;
     polls += 1;
-    if (isError) throw new Error(`dsh_wait_goal error: ${JSON.stringify(parsed)}`);
+    if (isError) throw new Error(`dsh_wait_until_action_required error: ${JSON.stringify(parsed)}`);
     if (parsed?.needs_user_action) return parsed;
     if (parsed?.terminal) return parsed;
     if (parsed?.continuation_required) continue;
@@ -70,7 +70,7 @@ console.log('target:', BASE);
 const transport = new StreamableHTTPClientTransport(new URL(BASE), {
   requestInit: readToken() ? { headers: { Authorization: `Bearer ${readToken()}` } } : {},
 });
-const client = new Client({ name: 'dsh-chatgpt-bridge-goal-dogfood', version: '0.4.1' });
+const client = new Client({ name: 'dsh-chatgpt-bridge-goal-dogfood', version: '0.5.0' });
 
 try {
   await client.connect(transport);
@@ -78,7 +78,7 @@ try {
   console.log('\n[1] health + capabilities');
   const health = await call(client, 'dsh_health');
   check('health status ok', health.isError === false && health.parsed?.status === 'ok', JSON.stringify(health.parsed));
-  check('version 0.4.1', health.parsed?.bridge?.version === '0.4.1', String(health.parsed?.bridge?.version));
+  check('version 0.5.0', health.parsed?.bridge?.version === '0.5.0', String(health.parsed?.bridge?.version));
 
   const listed = await call(client, 'dsh_list_workspaces');
   const workspaces = listed.parsed?.workspaces ?? listed.parsed ?? [];
@@ -91,7 +91,7 @@ try {
   if (typeof picked !== 'string') throw new Error('no registered workspace');
 
   console.log('\n[A] minimal 35-second Goal');
-  const startA = await call(client, 'dsh_start_goal', {
+  const startA = await call(client, 'dsh_create_goal', {
     workspace: picked,
     goal: '只等待 35 秒然后完成。禁止扫描 workspace。禁止修改文件。不要创建报告。',
     execution_mode: 'minimal',
@@ -102,8 +102,8 @@ try {
   check('revision 1', startA.parsed?.goal?.revision === 1, JSON.stringify(startA.parsed?.goal));
   check('mode minimal', startA.parsed?.goal?.mode === 'minimal', String(startA.parsed?.goal?.mode));
 
-  const firstWait = await call(client, 'dsh_wait_goal', { session_id: sessionA, wait_seconds: 25 });
-  check('first wait_goal returned', firstWait.isError === false, JSON.stringify(firstWait.parsed?.status));
+  const firstWait = await call(client, 'dsh_wait_until_action_required', { session_id: sessionA, wait_seconds: 60 });
+  check('first action-required wait returned', firstWait.isError === false, JSON.stringify(firstWait.parsed?.status));
   const doneA = firstWait.parsed?.terminal
     ? firstWait.parsed
     : await waitLoop(client, sessionA);
@@ -114,7 +114,7 @@ try {
   check('no recursive workspace listing in wait payload', !/169708|Get-ChildItem -Recurse/i.test(dumpA), '');
 
   console.log('\n[B] defer / independent branch / resume (mock release, no publish)');
-  const startB = await call(client, 'dsh_start_goal', {
+  const startB = await call(client, 'dsh_create_goal', {
     workspace: picked,
     goal: [
       'Mock a release-shaped plan without publishing or pushing.',

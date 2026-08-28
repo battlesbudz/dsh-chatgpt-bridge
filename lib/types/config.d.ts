@@ -28,7 +28,33 @@ export declare const ConfigSchema: z<Schemastery.ObjectS<{
     /** Max characters per message text returned by dsh_get_session. */
     sessionMaxChars: z<number, number>;
     /** Log verbosity: debug | info | warn | error. */
-    logLevel: z<"debug" | "info" | "warn" | "error", "debug" | "info" | "warn" | "error">;
+    logLevel: z<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn">;
+    /** Risk-tiered auto-approval policy. Omitted fields keep the safe defaults. */
+    approvalPolicy: z<Schemastery.ObjectS<{
+        read: z<"auto" | "ask", "auto" | "ask">;
+        test: z<"auto" | "ask", "auto" | "ask">;
+        build: z<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: z<"auto" | "ask", "auto" | "ask">;
+        localCommit: z<"auto" | "ask", "auto" | "ask">;
+        externalWrite: z<"auto" | "ask", "auto" | "ask">;
+        gitPush: z<"auto" | "ask", "auto" | "ask">;
+        npmPublish: z<"auto" | "ask", "auto" | "ask">;
+        githubRelease: z<"auto" | "ask", "auto" | "ask">;
+        secrets: z<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: z<"deny" | "ask", "deny" | "ask">;
+    }>, Schemastery.ObjectT<{
+        read: z<"auto" | "ask", "auto" | "ask">;
+        test: z<"auto" | "ask", "auto" | "ask">;
+        build: z<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: z<"auto" | "ask", "auto" | "ask">;
+        localCommit: z<"auto" | "ask", "auto" | "ask">;
+        externalWrite: z<"auto" | "ask", "auto" | "ask">;
+        gitPush: z<"auto" | "ask", "auto" | "ask">;
+        npmPublish: z<"auto" | "ask", "auto" | "ask">;
+        githubRelease: z<"auto" | "ask", "auto" | "ask">;
+        secrets: z<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: z<"deny" | "ask", "deny" | "ask">;
+    }>>;
 }>, Schemastery.ObjectT<{
     /** MCP transport: 'http' (Streamable HTTP) or 'stdio' (local MCP clients). */
     transport: z<"http" | "stdio", "http" | "stdio">;
@@ -53,8 +79,35 @@ export declare const ConfigSchema: z<Schemastery.ObjectS<{
     /** Max characters per message text returned by dsh_get_session. */
     sessionMaxChars: z<number, number>;
     /** Log verbosity: debug | info | warn | error. */
-    logLevel: z<"debug" | "info" | "warn" | "error", "debug" | "info" | "warn" | "error">;
+    logLevel: z<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn">;
+    /** Risk-tiered auto-approval policy. Omitted fields keep the safe defaults. */
+    approvalPolicy: z<Schemastery.ObjectS<{
+        read: z<"auto" | "ask", "auto" | "ask">;
+        test: z<"auto" | "ask", "auto" | "ask">;
+        build: z<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: z<"auto" | "ask", "auto" | "ask">;
+        localCommit: z<"auto" | "ask", "auto" | "ask">;
+        externalWrite: z<"auto" | "ask", "auto" | "ask">;
+        gitPush: z<"auto" | "ask", "auto" | "ask">;
+        npmPublish: z<"auto" | "ask", "auto" | "ask">;
+        githubRelease: z<"auto" | "ask", "auto" | "ask">;
+        secrets: z<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: z<"deny" | "ask", "deny" | "ask">;
+    }>, Schemastery.ObjectT<{
+        read: z<"auto" | "ask", "auto" | "ask">;
+        test: z<"auto" | "ask", "auto" | "ask">;
+        build: z<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: z<"auto" | "ask", "auto" | "ask">;
+        localCommit: z<"auto" | "ask", "auto" | "ask">;
+        externalWrite: z<"auto" | "ask", "auto" | "ask">;
+        gitPush: z<"auto" | "ask", "auto" | "ask">;
+        npmPublish: z<"auto" | "ask", "auto" | "ask">;
+        githubRelease: z<"auto" | "ask", "auto" | "ask">;
+        secrets: z<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: z<"deny" | "ask", "deny" | "ask">;
+    }>>;
 }>>;
+import type { UserApprovalPolicy } from './approval-policy.js';
 /** Input shape accepted from the cordis row config (schema input side). */
 export interface BridgeConfigInput {
     transport?: 'http' | 'stdio';
@@ -69,6 +122,7 @@ export interface BridgeConfigInput {
     sessionMaxItems?: number;
     sessionMaxChars?: number;
     logLevel?: LogLevel;
+    approvalPolicy?: UserApprovalPolicy;
 }
 /** Fully resolved configuration after token resolution. */
 export interface ResolvedBridgeConfig {
@@ -84,7 +138,16 @@ export interface ResolvedBridgeConfig {
     sessionMaxChars: number;
     logLevel: LogLevel;
     dshHome: string;
+    approvalPolicy?: UserApprovalPolicy;
 }
+/** Convert URL authority host syntax to the bare form required by sockets. */
+export declare function normalizeSocketHostname(host: string): string;
+/** True only for listener hosts whose bind scope is loopback-only. */
+export declare function isLoopbackHost(host: string): boolean;
+/** Select a concrete address that can reach a wildcard listener locally. */
+export declare function bridgeConnectHost(listenerHost: string): string;
+/** Build a syntactically valid local probe URL, including IPv6 brackets. */
+export declare function bridgeHttpUrl(listenerHost: string, port: number): string;
 export declare function defaultDshHome(env: Record<string, string | undefined>): string;
 /** Resolve the effective configuration (defaults + token resolution). */
 export declare function resolveConfig(input: BridgeConfigInput, env: Record<string, string | undefined>): ResolvedBridgeConfig;

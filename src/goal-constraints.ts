@@ -11,20 +11,38 @@ export type ActionClass =
   | 'filesystem.write'
   | 'filesystem.scan'
   | 'process.exec'
+  | 'process.spawn'
+  | 'git.read'
   | 'git.mutate'
   | 'npm.publish'
   | 'github.release'
-  | 'network';
+  | 'network'
+  | 'credentials.metadata'
+  | 'workspace.read'
+  | 'workspace.write'
+  | 'temp.read'
+  | 'temp.write'
+  | 'external_path.read'
+  | 'external_path.write';
 
 export const ACTION_CLASSES: readonly ActionClass[] = [
   'filesystem.read',
   'filesystem.write',
   'filesystem.scan',
   'process.exec',
+  'process.spawn',
+  'git.read',
   'git.mutate',
   'npm.publish',
   'github.release',
   'network',
+  'credentials.metadata',
+  'workspace.read',
+  'workspace.write',
+  'temp.read',
+  'temp.write',
+  'external_path.read',
+  'external_path.write',
 ];
 
 export interface GoalConstraints {
@@ -65,6 +83,10 @@ const SCAN_COMMAND = /(?:Get-ChildItem|gci|dir|Get-FileHash|Get-ChildItem)\b[\s\
 const RECURSIVE_LIST = /(?:Get-ChildItem|gci)\b/i;
 const RECURSE_FLAG = /(?:-Recurse|-r\b|\/s\b|--recursive)/i;
 const HASH_TREE = /Get-FileHash\b[\s\S]*-Recurse|\bhash\b[\s\S]*workspace/i;
+
+const GIT_READ_COMMAND = /\bgit\s+(?:status|diff|log|show|rev-parse|ls-remote|describe|remote|config\s+--get|cat-file|branch(?!\s+-[dD]))\b/i;
+const GIT_MUTATE_COMMAND = /\bgit\s+(?:add|commit|tag(?!\s+-[l\b])|push|reset|checkout\s+-b|merge|rebase|revert|worktree\s+add|branch\s+-[dD])\b/i;
+const SPAWN_COMMAND = /\b(?:npm\s+test|pnpm\s+test|yarn\s+test|node\s+--test|npm\s+run\s+test|jest|vitest|mocha)\b/i;
 
 export function parseExecutionMode(value: unknown): ExecutionMode {
   if (value === 'minimal' || value === 'strict' || value === 'standard') return value;
@@ -147,6 +169,9 @@ export function classesForTool(toolName: string, command?: string): ActionClass[
   if (command !== undefined && command.trim() !== '') {
     if (isWorkspaceScanCommand(command)) out.add('filesystem.scan');
     if (isWriteCommand(command)) out.add('filesystem.write');
+    if (SPAWN_COMMAND.test(command)) out.add('process.spawn');
+    if (GIT_READ_COMMAND.test(command)) out.add('git.read');
+    if (GIT_MUTATE_COMMAND.test(command)) out.add('git.mutate');
     for (const kind of classifyCommand(command)) {
       if (kind === 'git_push' || kind === 'git_tag' || kind === 'git_worktree_add') out.add('git.mutate');
       if (kind === 'npm_publish' || kind === 'npm_pack') out.add('npm.publish');

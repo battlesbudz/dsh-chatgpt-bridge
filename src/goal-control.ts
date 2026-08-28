@@ -35,6 +35,7 @@ export type GoalHistoryType =
   | 'question_requested'
   | 'question_answered'
   | 'constraint_rejected'
+  | 'step_skipped'
   | 'goal_completed'
   | 'goal_cancelled';
 
@@ -59,6 +60,13 @@ export interface GoalHistoryEvent {
   metadata?: Record<string, unknown>;
 }
 
+export interface BlockedStepRecord {
+  step_id: string;
+  reason: string;
+  seq: number;
+  superseded?: boolean;
+}
+
 export interface GoalRecord {
   goal_id: string;
   session_id: string;
@@ -73,15 +81,29 @@ export interface GoalRecord {
   revisions: GoalRevisionSnapshot[];
   deferred_step_ids: string[];
   completed_action_kinds: ActionKind[];
+  active_blockers?: BlockedStepRecord[];
+  superseded_step_ids?: string[];
   history: GoalHistoryEvent[];
   history_seq: number;
+}
+
+/** Compact revision row for folded UI / wire payloads. No goal/plan text. */
+export interface FoldedRevision {
+  revision: number;
+  previous_revision?: number;
+  revision_reason: string;
+  created_at: string;
 }
 
 export interface GoalSupervisionView {
   goal_id: string;
   revision: number;
   mode: ExecutionMode;
+  card: string;
+  revision_history_folded: boolean;
+  revision_history: FoldedRevision[];
   previous_revision?: number;
+  revisions?: GoalRevisionSnapshot[];
 }
 
 export interface CreateGoalInput {
@@ -99,11 +121,35 @@ export interface ReviseGoalInput {
   plan?: string;
   mode?: ExecutionMode;
   constraints?: GoalConstraints;
+  expectedRevision?: number;
   deferredStepIds?: string[];
   resumeStepIds?: string[];
   completedActionKinds?: ActionKind[];
   revisionReason?: string;
   now?: number;
+}
+
+export function isGoalSemanticallyEqual(
+  record: GoalRecord,
+  goal: string,
+  plan?: string,
+  mode?: ExecutionMode,
+  constraints?: GoalConstraints,
+): boolean {
+  if (record.goal.trim() !== goal.trim()) return false;
+  if ((record.plan ?? '').trim() !== (plan ?? '').trim()) return false;
+  if (mode !== undefined && record.mode !== parseExecutionMode(mode)) return false;
+  if (constraints !== undefined) {
+    const merged = mergeConstraints(defaultConstraintsForMode(record.mode), constraints);
+    if (JSON.stringify(record.constraints) !== JSON.stringify(merged)) return false;
+  }
+  return true;
+}
+
+export function pruneBlockers(record: GoalRecord, completedKinds: Iterable<ActionKind>): void {
+  if (!record.active_blockers) return;
+  const completed = new Set(completedKinds);
+  record.active_blockers = record.active_blockers.filter((b) => !completed.has(b.step_id as ActionKind));
 }
 
 export interface GoalStoreIo {
@@ -179,6 +225,8 @@ export function createGoalRecord(input: CreateGoalInput): GoalRecord {
     revisions: [],
     deferred_step_ids: [],
     completed_action_kinds: [],
+    active_blockers: [],
+    superseded_step_ids: [],
     history: [],
     history_seq: 0,
   };
@@ -188,6 +236,9 @@ export function createGoalRecord(input: CreateGoalInput): GoalRecord {
 }
 
 export function applyRevision(record: GoalRecord, input: ReviseGoalInput, type: 'goal_revised' | 'goal_resumed'): GoalRecord {
+  if (input.expectedRevision !== undefined && input.expectedRevision !== record.revision) {
+    throw new Error(`REVISION_CONFLICT: expected revision ${input.expectedRevision}, but current revision is ${record.revision}`);
+  }
   const now = input.now ?? Date.now();
   const at = iso(now);
   const next: GoalRecord = {
@@ -195,6 +246,8 @@ export function applyRevision(record: GoalRecord, input: ReviseGoalInput, type: 
     revisions: [...record.revisions],
     deferred_step_ids: [...record.deferred_step_ids],
     completed_action_kinds: [...record.completed_action_kinds],
+    active_blockers: record.active_blockers ? [...record.active_blockers] : [],
+    superseded_step_ids: record.superseded_step_ids ? [...record.superseded_step_ids] : [],
     history: [...record.history],
     constraints: { ...record.constraints },
   };
@@ -284,10 +337,14 @@ export function sliceHistory(
 }
 
 export function supervisionGoal(record: GoalRecord): GoalSupervisionView {
+  const revision_history = foldRevisionHistory(record);
   return {
     goal_id: record.goal_id,
     revision: record.revision,
     mode: record.mode,
+    card: goalCardLabel(record),
+    revision_history_folded: revision_history.length > 1,
+    revision_history,
     ...(record.revision > 1 ? { previous_revision: record.revision - 1 } : {}),
   };
 }
@@ -454,4 +511,17 @@ export function goalControlDir(dshHome: string): string {
 export function revisionBanner(record: GoalRecord): string {
   const deferred = record.deferred_step_ids.length === 0 ? '' : ` · deferred: ${record.deferred_step_ids.join(', ')}`;
   return `[Goal] rev ${record.revision} · ${record.mode}${deferred}`;
+}
+
+export function goalCardLabel(record: { revision: number }): string {
+  return `Goal rev ${record.revision}`;
+}
+
+export function foldRevisionHistory(record: GoalRecord): FoldedRevision[] {
+  return record.revisions.map((snapshot) => ({
+    revision: snapshot.revision,
+    ...(snapshot.previous_revision === undefined ? {} : { previous_revision: snapshot.previous_revision }),
+    revision_reason: snapshot.revision_reason,
+    created_at: snapshot.created_at,
+  }));
 }

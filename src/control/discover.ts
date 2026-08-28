@@ -20,6 +20,8 @@ import { homedir } from 'node:os';
 import { posix as posixPath, win32 as win32Path, type PlatformPath } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+import { normalizeSocketHostname } from '../config.js';
+
 export type DiscoverySource = 'configured' | 'path' | 'well-known' | 'running-process';
 
 export interface DiscoveredExecutable {
@@ -179,7 +181,7 @@ export function healthBaseFromListenAddr(addr: string): string | undefined {
   if (/^https?:\/\//i.test(trimmed)) {
     try {
       const url = new URL(trimmed);
-      const host = url.hostname.toLowerCase();
+      const host = normalizeSocketHostname(url.hostname).toLowerCase();
       if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return undefined;
       if (url.port === '0') return undefined;
       return url.origin;
@@ -471,7 +473,7 @@ function parseProxyEnv(value: string | undefined): DiscoveredProxyHint | undefin
   if (value === undefined || value === '') return undefined;
   try {
     const url = new URL(value);
-    const host = url.hostname;
+    const host = normalizeSocketHostname(url.hostname);
     const port = url.port !== '' ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
     if (host === '' || !Number.isInteger(port) || port < 1 || port > 65535) return undefined;
     return { host, port, source: 'env' };

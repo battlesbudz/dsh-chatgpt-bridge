@@ -11,6 +11,7 @@ import { connect as tlsConnect, type TLSSocket } from 'node:tls';
 import { get as httpGet, request as httpRequest } from 'node:http';
 import { get as httpsGet } from 'node:https';
 
+import { normalizeSocketHostname } from '../config.js';
 import type { DoctorStep, TunnelDetectionResult } from './types.js';
 
 export interface BridgeProbeResult {
@@ -30,7 +31,7 @@ export interface BridgeProbeOptions {
 function parseUrl(url: string): { host: string; port: number; path: string } {
   const u = new URL(url);
   return {
-    host: u.hostname,
+    host: normalizeSocketHostname(u.hostname),
     port: u.port === '' ? (u.protocol === 'https:' ? 443 : 80) : Number(u.port),
     path: u.pathname + u.search,
   };
@@ -39,7 +40,7 @@ function parseUrl(url: string): { host: string; port: number; path: string } {
 /** Cheap TCP reachability check for a host:port. */
 export async function tcpReachable(host: string, port: number, timeoutMs = 2000): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = connect({ host, port });
+    const socket = connect({ host: normalizeSocketHostname(host), port });
     const timer = setTimeout(() => {
       socket.destroy();
       resolve(false);
@@ -96,7 +97,7 @@ export async function httpGetStatus(url: string, timeoutMs = 2000): Promise<numb
       const u = new URL(url);
       const getter = u.protocol === 'https:' ? httpsGet : httpGet;
       const req = getter(
-        { host: u.hostname, port: u.port === '' ? undefined : Number(u.port), path: u.pathname + u.search, timeout: timeoutMs },
+        { host: normalizeSocketHostname(u.hostname), port: u.port === '' ? undefined : Number(u.port), path: u.pathname + u.search, timeout: timeoutMs },
         (res) => {
           res.resume();
           resolve(res.statusCode);
@@ -177,18 +178,20 @@ interface ControlPlaneRawOutcome {
 
 /** Loopback targets bypass the proxy, mirroring tunnel-client's NO_PROXY. */
 function isLoopbackHost(hostname: string): boolean {
+  const host = normalizeSocketHostname(hostname).toLowerCase();
   return (
-    hostname === 'localhost' ||
-    hostname.endsWith('.localhost') ||
-    hostname === '::1' ||
-    hostname === '127.0.0.1' ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '::1' ||
+    host === '127.0.0.1' ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
   );
 }
 
 /** IPv4 literal or bare IPv6 (no brackets): never used as TLS SNI. */
 function isIpLiteral(hostname: string): boolean {
-  return hostname.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+  const host = normalizeSocketHostname(hostname);
+  return host.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
 }
 
 /** Direct (proxy disabled / loopback) probe: current semantics preserved. */
@@ -202,7 +205,7 @@ function probeDirect(u: URL, headers: Record<string, string>, timeoutMs: number)
       }
     };
     const req = (u.protocol === 'https:' ? httpsGet : httpGet)(
-      { host: u.hostname, port: u.port === '' ? undefined : Number(u.port), path: u.pathname + u.search, headers, timeout: timeoutMs },
+      { host: normalizeSocketHostname(u.hostname), port: u.port === '' ? undefined : Number(u.port), path: u.pathname + u.search, headers, timeout: timeoutMs },
       (res) => {
         res.resume();
         done({ statusCode: res.statusCode, stage: 'request' });
@@ -252,7 +255,7 @@ export function probeHttpsViaProxy(
     const hostPort = u.port !== '' ? u.host : `${u.host}:${u.protocol === 'https:' ? 443 : 80}`;
     let socket: Socket;
     try {
-      socket = connect({ host: proxy.host, port: proxy.port });
+      socket = connect({ host: normalizeSocketHostname(proxy.host), port: proxy.port });
     } catch {
       done({ error: 'proxy-connect-failed', stage: 'proxy-connect' });
       return;
@@ -285,7 +288,7 @@ export function probeHttpsViaProxy(
           socket,
           // RFC 6066 forbids IP-literal SNI (Node DEP0123); skip servername
           // for IP hosts and only set it for DNS names.
-          servername: isIpLiteral(u.hostname) ? undefined : u.hostname,
+          servername: isIpLiteral(u.hostname) ? undefined : normalizeSocketHostname(u.hostname),
           rejectUnauthorized,
         });
         tlsSocket.setTimeout(timeoutMs, () => {
@@ -300,7 +303,7 @@ export function probeHttpsViaProxy(
           const req = httpRequest(
             {
               createConnection: () => tlsSocket,
-              host: u.hostname,
+              host: normalizeSocketHostname(u.hostname),
               port: u.port === '' ? 443 : Number(u.port),
               method: 'GET',
               path: u.pathname + u.search,
@@ -360,7 +363,7 @@ export function probeHttpViaProxy(
     };
     const req = httpRequest(
       {
-        host: proxy.host,
+        host: normalizeSocketHostname(proxy.host),
         port: proxy.port,
         method: 'GET',
         path: u.href,

@@ -9,21 +9,29 @@ import { createMcpServer } from '../../lib/mcp.js';
 import { startHttpServer } from '../../lib/http.js';
 
 const EXPECTED_TOOLS = [
-  'dsh_health',
-  'dsh_list_workspaces',
-  'dsh_create_session',
-  'dsh_list_sessions',
-  'dsh_get_session',
-  'dsh_send_message',
-  'dsh_get_task_status',
-  'dsh_get_result',
-  'dsh_cancel_task',
   'dsh_answer_question',
   'dsh_approve',
+  'dsh_cancel_task',
+  'dsh_create_goal',
+  'dsh_create_session',
+  'dsh_credential_status',
+  'dsh_get_result',
+  'dsh_get_session',
+  'dsh_get_task_status',
+  'dsh_health',
+  'dsh_list_sessions',
+  'dsh_list_workspaces',
+  'dsh_pause_goal',
+  'dsh_rerun_step',
+  'dsh_resume_goal',
+  'dsh_retry_step',
+  'dsh_revise_goal',
+  'dsh_send_message',
   'dsh_start_goal',
-  'dsh_wait_goal',
   'dsh_stop_goal',
   'dsh_update_goal',
+  'dsh_wait_goal',
+  'dsh_wait_until_action_required',
 ];
 
 function freePort() {
@@ -113,7 +121,7 @@ test('shipped plugin entry exports name, apply, and Config', async () => {
   assert.ok(Config);
 });
 
-test('createMcpServer registers exactly the 15 public dsh_* tools', () => {
+test('createMcpServer registers all public dsh_* tools (v0.5.0)', () => {
   const server = createMcpServer(
     {},
     { resultMaxChars: 100, resultMaxItems: 10, sessionMaxItems: 5, sessionMaxChars: 100 },
@@ -121,7 +129,7 @@ test('createMcpServer registers exactly the 15 public dsh_* tools', () => {
   );
   const names = Object.keys(server._registeredTools).sort();
   assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
-  assert.equal(names.length, 15);
+  assert.equal(names.length, 23);
 });
 
 test('package clean script is ESM-safe under type:module', () => {
@@ -129,6 +137,53 @@ test('package clean script is ESM-safe under type:module', () => {
   assert.equal(manifest.type, 'module');
   assert.match(manifest.scripts.clean, /import\s*\{[^}]*rmSync/);
   assert.doesNotMatch(manifest.scripts.clean, /\brequire\s*\(/);
+});
+
+test('shared DSH host contracts are peers instead of ordinary dependencies', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const sharedHostPackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-llm'];
+
+  for (const packageName of sharedHostPackages) {
+    assert.equal(manifest.dependencies?.[packageName], undefined);
+    assert.equal(typeof manifest.peerDependencies?.[packageName], 'string');
+    assert.equal(typeof manifest.devDependencies?.[packageName], 'string');
+  }
+});
+
+test('package manifest targets the verified DSH 0.1.1-rc.2 family', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  for (const section of ['dependencies', 'devDependencies']) {
+    for (const [packageName, version] of Object.entries(manifest[section] ?? {})) {
+      if (packageName.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.1.1-rc.2', `${section}.${packageName}`);
+    }
+  }
+  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-llm'], '^0.1.1-rc.2');
+});
+
+test('package.json and package-lock.json carry the same release version', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const lock = JSON.parse(readFileSync(new URL('../../package-lock.json', import.meta.url), 'utf8'));
+
+  assert.equal(lock.version, manifest.version);
+  assert.equal(lock.packages?.['']?.version, manifest.version);
+});
+
+test('test runner selects the Node 22 isolation spelling before running the suite', () => {
+  const runner = readFileSync(new URL('../../scripts/test.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /nodeMajor === 22\s*\?\s*['"]--experimental-test-isolation=none['"]/);
+  assert.doesNotMatch(runner, /result\.status\s*===\s*9/);
+});
+
+test('v0.5.0 README and Goal dogfood stay aligned with the shipped control-plane surface', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
+  const dogfood = readFileSync(new URL('../../scripts/goal-control-dogfood.mjs', import.meta.url), 'utf8');
+
+  assert.match(readme, new RegExp(`v${manifest.version.replaceAll('.', '\\.')}`));
+  assert.match(readme, /tool count = 23/);
+  assert.match(dogfood, new RegExp(`version:\\s*['"]${manifest.version.replaceAll('.', '\\.')}['"]`));
+  assert.match(dogfood, /dsh_create_goal/);
+  assert.match(dogfood, /dsh_wait_until_action_required/);
 });
 
 test('startHttpServer.close stops accepting connections', async () => {

@@ -30,6 +30,7 @@ export interface GoalMessageOptions {
     intent?: 'start' | 'revise' | 'resume' | 'defer';
 }
 export declare function buildGoalMessage(goal: string, plan?: string, options?: GoalMessageOptions): string;
+export declare function foldedGoalDisplay(record: GoalRecord): string;
 /** Full Agent-turn payload: [Goal] banner + authority rules + goal/plan/mode. */
 export declare function buildSupervisedGoalContext(record: GoalRecord, goal: string, plan: string | undefined, intent: 'start' | 'revise' | 'resume' | 'defer', resumeSteps?: string[]): string;
 export interface ExecutionSupervisionView {
@@ -87,6 +88,11 @@ export interface GoalStartResult {
     continuation_required: boolean;
     next_action: string;
     next_tool_call?: GoalToolCall;
+    existing_goal_reused?: boolean;
+    revision_unchanged?: boolean;
+    conflicts?: string[];
+    evidence_id?: string;
+    workspace_lock_acquired?: boolean;
     goal?: GoalSupervisionView;
     execution?: ExecutionSupervisionView;
     history?: GoalHistoryEvent[];

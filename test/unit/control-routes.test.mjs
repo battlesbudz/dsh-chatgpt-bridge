@@ -155,6 +155,20 @@ test('routes: valid start mutation is allowed', async () => {
   assert.ok(res.body.includes('"ok":true'));
 });
 
+test('routes: IPv6 loopback Host and Origin are allowed but wildcard IPv6 Origin is denied', async () => {
+  const { getRoute } = await setup();
+  const ipv6 = validMutation('/_dsh/chatgpt-bridge/start');
+  ipv6.headers = { ...ipv6.headers, host: '[::1]:3080', origin: 'http://[::1]:3080' };
+  const allowed = await call(getRoute(), makeReq({ ...ipv6, remoteAddress: '::1' }), makeRes());
+  assert.equal(allowed.statusCode, 200);
+
+  const wildcard = validMutation('/_dsh/chatgpt-bridge/start');
+  wildcard.headers = { ...wildcard.headers, host: '[::1]:3080', origin: 'http://[::]:3080' };
+  const denied = await call(getRoute(), makeReq({ ...wildcard, remoteAddress: '::1' }), makeRes());
+  assert.equal(denied.statusCode, 403);
+  assert.ok(denied.body.includes('bad-origin'));
+});
+
 test('routes: GET /config includes discovered hints and never leaks profile secrets', async () => {
   const tmp = mkdtempSync(join(process.cwd(), '.ctrl-routes-'));
   const bridge = await startFakeBridge();

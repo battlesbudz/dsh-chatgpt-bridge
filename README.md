@@ -4,7 +4,7 @@
 
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. v0.4.1 — *DSH 0.1.1-rc.1 Compatibility Release & Native Settings*.
+Protocol**. v0.5.0 — *Control Plane Reliability* on DSH 0.1.1-rc.2.
 The v0.3.0 Goal Control Plane and v0.4.0 Native Settings are preserved. The bridge only
 *connects* — DSH keeps its own session log, agent loop, tools, skills,
 subagents, workflows, approvals, sandbox and workspace security model. It is a
@@ -17,7 +17,32 @@ standalone DSH plugin: **zero DSH core modifications**.
 
 > Self-hosted / dogfooding development: implemented against DeepSeek
 > Harness and verified end-to-end against live local DSH
-> runtimes (verified up to `0.1.1-rc.1`) with the official MCP SDK client.
+> runtimes through `0.1.1-rc.1` with the official MCP SDK client. The v0.5.0
+> release targets `0.1.1-rc.2` and has passed the automated gates below; a
+> fresh live-runtime E2E remains a separately reported verification boundary.
+
+## Project status / maintenance
+
+This project is actively maintained as an independent DSH plugin. The primary
+maintainer is [`jiezeng2004-design`](https://github.com/jiezeng2004-design).
+Ongoing maintenance includes tracking DeepSeek Harness upstream compatibility,
+preparing compatibility releases, preserving MCP tool/schema behavior, testing
+runtime lifecycle and security-sensitive tunnel changes, and keeping install
+and operational documentation current.
+
+The current release is `dsh-chatgpt-bridge@0.5.0` and targets DSH
+`0.1.1-rc.2`; see the [compatibility matrix](#compatibility-matrix) for the
+automated and live-runtime evidence boundary.
+
+## Ecosystem / distribution
+
+- Published npm package: [`dsh-chatgpt-bridge`](https://www.npmjs.com/package/dsh-chatgpt-bridge)
+- MCP directory listing: [M8ven](https://m8ven.ai/mcp/jiezeng2004-design-dsh-chatgpt-bridge-14d0zo)
+- Third-party install-tested listing: [dshbase](https://dshbase.com/plugins/dsh-chatgpt-bridge/)
+- Third-party manifest-based listing: [DSHarness](https://dsharness.org/plugin/jiezeng2004-design/dsh-chatgpt-bridge)
+
+Directory labels describe each directory's own checks; they are not security
+audits or evidence of a particular number of active users.
 
 ## Project status / maintenance
 
@@ -167,8 +192,10 @@ Expected:
 
 ```text
 health = ok
-bridge version = 0.4.1
+bridge version = 0.5.0
 ```
+
+The v0.5.0 npm package and a source install from this tag both report `0.5.0`.
 
 Then a minimal Goal Supervision example (still read-only):
 
@@ -337,9 +364,10 @@ After completing Quick Start steps 1–3:
 4. Ask ChatGPT to call `dsh_health`.
 5. Confirm:
    - `health = ok`
-   - `bridge version = 0.4.1`
-   - **tool count = 15**
-   - `dsh_update_goal` exists in the tool list
+   - `bridge version = 0.5.0`
+   - **tool count = 23**
+   - `dsh_create_goal`, `dsh_rerun_step`, and
+     `dsh_wait_until_action_required` exist in the tool list
 6. Optionally call `dsh_list_workspaces` to confirm your workspace is
    visible.
 
@@ -396,8 +424,8 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 
 ## Detailed install
 
-The plugin is a standard DSH profile bundle. It currently targets DSH
-`0.1.1-rc.1` (verified baseline).
+The plugin is a standard DSH profile bundle. The v0.5.0 release targets DSH
+`0.1.1-rc.2`.
 
 **Recommended: one DSH runtime for both Web `:3080` and the MCP bridge `:3456`.**
 ChatGPT-created sessions are native DSH sessions. The Web UI only sees them
@@ -411,11 +439,10 @@ The Quick Start uses `dsh plugin --profile web add dsh-chatgpt-bridge`. If
 `dsh` is not on your `PATH`, the equivalent is:
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add dsh-chatgpt-bridge
-# published: ... add dsh-chatgpt-bridge@0.4.1
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile web add dsh-chatgpt-bridge@0.5.0
 
 # boot ONE process — Web :3080 and MCP :3456
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile web
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 --profile web
 ```
 
 `dsh_health.capabilities.webSurface` is `true` when the Web gateway is in this
@@ -428,7 +455,7 @@ and can be resumed later, but DSH Web `:3080` will not stream them in real
 time.
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.4.1
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.5.0
 pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile chatgpt-bridge
 ```
 
@@ -442,8 +469,8 @@ git clone https://github.com/jiezeng2004-design/dsh-chatgpt-bridge.git
 cd dsh-chatgpt-bridge
 npm ci
 npm run build
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add "file:$PWD"
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile web
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile web add "file:$PWD"
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 --profile web
 ```
 
 For either installation method, `dsh plugin` installs the package into the
@@ -792,12 +819,14 @@ DSH core modifications: **0**.
 
 | dsh-chatgpt-bridge | DeepSeek Harness | Status | Evidence / notes |
 | --- | --- | --- | --- |
-| `v0.4.1` | `0.1.1-rc.1` | Current public verified baseline | Compatibility release; tag manifest and regression gates target rc.1 |
-| `v0.4.0` | `0.1.0-rc.6` | Historical verified baseline | Native Settings & Tunnel Runtime Manager release; tag manifest targets rc.6 |
-| `v0.4.0` | `0.1.0-rc.7` | Documented compatible | The v0.4.0 CHANGELOG records rc.7-specific Native Settings fixes |
-| `v0.3.0` | `0.1.0-rc.6` | Historical | Goal Control Plane release; tag manifest targets rc.6 |
-| `v0.2.0` | `0.1.0-rc.6` | Historical | Tag manifest targets rc.6 |
-| `v0.1.0` | `0.1.0-rc.6` | Historical | Initial release; tag manifest targets rc.6 |
+| `v0.5.0` | `0.1.1-rc.2` | Published / automated verified | Typecheck/build and 373-test local suite passed (372 pass, 1 Windows platform skip); production audit is 0 vulnerabilities; package and clean temporary tarball install/import passed; fresh real DSH/ChatGPT UI validation remains pending |
+| `0.4.2` (unpublished snapshot) | `0.1.1-rc.2` | Historical local gate | Compatibility and security hardening was folded into the subsequent v0.5.0 worktree; never tagged or published |
+| `v0.4.1` | `0.1.1-rc.1` | Published / verified | Tag manifest and compatibility release |
+| `v0.4.0` | `0.1.0-rc.6` | Historical verified baseline | Tag manifest; Native Settings & Tunnel Runtime Manager release |
+| `v0.4.0` | `0.1.0-rc.7` | Historically documented | CHANGELOG records rc.7-specific Native Settings fixes; not re-run in this documentation audit |
+| `v0.3.0` | `0.1.0-rc.6` | Historical | Tag manifest; Goal Control Plane release |
+| `v0.2.0` | `0.1.0-rc.6` | Historical | Tag manifest |
+| `v0.1.0` | `0.1.0-rc.6` | Historical | Tag manifest; initial release |
 
 - Node >= 22.
 - Uses only public plugin seams; zero DSH core files are modified.

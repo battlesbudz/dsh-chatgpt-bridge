@@ -17,6 +17,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { BridgeLogger } from './log.js';
+import { bridgeHttpUrl, isLoopbackHost } from './config.js';
 
 export interface HttpServerHandle {
   port: number;
@@ -78,6 +79,11 @@ export function startHttpServer(
   options: { host: string; port: number; authMode: 'token' | 'none'; authToken: string },
   log: BridgeLogger,
 ): Promise<HttpServerHandle> {
+  if (options.authMode === 'none' && !isLoopbackHost(options.host)) {
+    return Promise.reject(
+      new Error(`authMode none is only allowed for loopback HTTP listeners; refusing non-loopback host ${options.host}`),
+    );
+  }
   return new Promise((resolve, reject) => {
     const authorize = (req: IncomingMessage): boolean => {
       if (options.authMode === 'none') return true;
@@ -177,10 +183,11 @@ export function startHttpServer(
     httpServer.listen(options.port, options.host, () => {
       const address = httpServer.address() as AddressInfo;
       const port = address.port;
-      log.info(`MCP Streamable HTTP server listening on http://${options.host}:${port}/mcp (auth: ${options.authMode})`);
+      const url = bridgeHttpUrl(options.host, port);
+      log.info(`MCP Streamable HTTP server listening on ${url} (auth: ${options.authMode})`);
       resolve({
         port,
-        url: `http://${options.host}:${port}/mcp`,
+        url,
         close: async () => {
           for (const entry of [...sessions.values()]) {
             try {

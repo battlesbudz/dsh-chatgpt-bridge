@@ -10,11 +10,16 @@ import { type ExecutionSupervisionView, type GoalStartResult, type GoalWaitResul
 import { type BlockedInfo } from './goal-graph.js';
 import { type GoalHistoryEvent, type GoalSupervisionView } from './goal-control.js';
 import { type ExecutionMode, type GoalConstraints } from './goal-constraints.js';
+import { type UserApprovalPolicy } from './approval-policy.js';
+import { WorkspaceConcurrencyGuard } from './workspace-guard.js';
+import { ExecutionIdempotencyManager } from './execution-idempotency.js';
+import { type ResultSchema, type CredentialStatus } from './result-schema.js';
 export { normalizePath } from './paths.js';
 /** Typed bridge error with a stable machine-readable code. */
 export declare class BridgeError extends Error {
     readonly code: string;
-    constructor(code: string, message: string);
+    readonly details?: Record<string, unknown>;
+    constructor(code: string, message: string, details?: Record<string, unknown>);
 }
 /** One parked approval waiting on a ChatGPT decision. */
 export interface PendingApproval {
@@ -23,9 +28,32 @@ export interface PendingApproval {
     toolName: string;
     callId?: string;
     reason?: string;
+    command?: string;
+    capability?: string;
+    level?: string;
     resolve: (outcome: ApprovalOutcome) => void;
     /** Set when the Web api-proxy parked this ask; settle via respond(). */
     muxRpcId?: string;
+}
+/** Who blocked or decided an approval, for deadlock diagnostics. */
+export type ApprovalLayer = 'user' | 'bridge_policy' | 'dsh_policy' | 'platform';
+export interface ApprovalRequestLike {
+    agent: {
+        id: string;
+        session?: {
+            events?: readonly {
+                type: string;
+                data?: unknown;
+            }[];
+            header?: {
+                cwd?: string;
+            };
+        };
+    };
+    toolName: string;
+    callId?: string;
+    reason?: string;
+    signal?: AbortSignal;
 }
 /** One parked user question waiting on a ChatGPT answer. */
 export interface PendingQuestion {
@@ -148,6 +176,7 @@ export interface ResultView {
         code: string;
         message: string;
     };
+    result_schema?: ResultSchema;
 }
 /** DSH version string, resolved lazily from the installed package. */
 export declare function dshVersion(): string;
@@ -170,6 +199,15 @@ export declare class Bridge {
     private apiProxy;
     private muxAbort;
     private webOwnsApprovals;
+    readonly workspaceGuard: WorkspaceConcurrencyGuard;
+    readonly idempotencyManager: ExecutionIdempotencyManager;
+    private readonly workspaceBaselines;
+    private readonly recordedMutationCalls;
+    private readonly recordedExecutionEvidenceCalls;
+    private readonly observedSuccessfulMutationCalls;
+    private readonly pendingBaselineRefresh;
+    private readonly pendingExecutionFingerprints;
+    approvalPolicy: UserApprovalPolicy;
     /** Test hooks for bounded wait loops. */
     now: () => number;
     sleep: (ms: number) => Promise<void>;
@@ -244,6 +282,38 @@ export declare class Bridge {
         execution?: ExecutionSupervisionView;
         history?: GoalHistoryEvent[];
     }>;
+    createGoal(input: {
+        workspace: string;
+        goal: string;
+        plan?: string;
+        execution_mode?: ExecutionMode;
+        constraints?: GoalConstraints;
+        request_id?: string;
+        workspace_lock_override?: boolean;
+    }): Promise<GoalStartResult>;
+    reviseGoal(input: {
+        session_id: string;
+        goal?: string;
+        plan?: string;
+        execution_mode?: ExecutionMode;
+        constraints?: GoalConstraints;
+        expected_revision?: number;
+        revision_reason?: string;
+        request_id?: string;
+        workspace_lock_override?: boolean;
+    }): Promise<GoalStartResult>;
+    pauseGoal(sessionId: string): Promise<{
+        session_id: string;
+        status: BridgeStatus;
+        paused: boolean;
+        checkpoint_revision: number;
+    }>;
+    resumeGoal(sessionId: string, resumeSteps?: string[], requestId?: string, workspaceLockOverride?: boolean): Promise<GoalStartResult>;
+    retryStep(sessionId: string, stepId: string, requestId?: string, workspaceLockOverride?: boolean): Promise<GoalStartResult>;
+    rerunStep(sessionId: string, stepId: string, requestId?: string, workspaceLockOverride?: boolean): Promise<GoalStartResult>;
+    waitUntilActionRequired(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult>;
+    getStructuredResult(sessionId: string): Promise<ResultSchema>;
+    getCredentialStatus(): CredentialStatus[];
     startGoal(input: {
         workspace: string;
         goal: string;
@@ -252,6 +322,8 @@ export declare class Bridge {
         request_id?: string;
         execution_mode?: ExecutionMode;
         constraints?: GoalConstraints;
+        expected_revision?: number;
+        workspace_lock_override?: boolean;
     }): Promise<GoalStartResult>;
     updateGoal(input: {
         session_id: string;
@@ -260,11 +332,13 @@ export declare class Bridge {
         plan?: string;
         execution_mode?: ExecutionMode;
         constraints?: GoalConstraints;
+        expected_revision?: number;
         defer_steps?: string[];
         resume_steps?: string[];
         revision_reason?: string;
         request_id?: string;
         workspace?: string;
+        workspace_lock_override?: boolean;
     }): Promise<GoalStartResult>;
     waitGoal(sessionId: string, waitSeconds?: number): Promise<GoalWaitResult>;
     stopGoal(sessionId: string): Promise<{
@@ -279,6 +353,12 @@ export declare class Bridge {
     private controlMessage;
     private mapGoalStart;
     private noteGoalEvent;
+    /**
+     * Decide a DSH approval/request for a managed session.
+     * Idempotent high-cost steps are skipped; L0/L1 may auto-approve;
+     * deny/reject always remain reachable even if approve is blocked.
+     */
+    decideApproval(request: ApprovalRequestLike, next?: () => Promise<ApprovalOutcome> | ApprovalOutcome): Promise<ApprovalOutcome>;
     private rejectConstraint;
     private observeGoal;
     private goalFields;
@@ -295,6 +375,23 @@ export declare class Bridge {
         session_id: string;
         decision: 'approve' | 'reject';
         outcome: ApprovalOutcome;
+        layer: ApprovalLayer;
+        fail_closed?: boolean;
     }>;
+    private isLockHolderActive;
+    private workspaceLockedError;
+    private assertMutableWorkspaceAvailable;
+    private takeWorkspaceLock;
+    private releaseWorkspaceIfTerminal;
+    private skipIdempotentStep;
+    private recordObservedExecutions;
+    private recordObservedExecutionFacts;
+    private executionFingerprintExtra;
+    private refreshWorkspaceBaselineIfNeeded;
+    private noteMutation;
+    private rememberMutationCall;
+    private rememberExecutionEvidenceCall;
+    private rememberObservedSuccessfulMutationCall;
+    private rememberPendingExecutionFingerprint;
     listManaged(): string[];
 }

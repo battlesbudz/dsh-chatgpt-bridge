@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { normalizeSocketHostname } from '../config.js';
 import type { RuntimeManager } from './runtime-manager.js';
 import { redactText } from '../redact.js';
 import type { RuntimeConfig } from './types.js';
@@ -50,7 +51,7 @@ function hostAllowed(host: string | undefined): boolean {
 function originAllowed(origin: string | undefined): boolean {
   if (origin === undefined || origin === '') return false;
   try {
-    const host = new URL(origin).hostname.toLowerCase();
+    const host = normalizeSocketHostname(new URL(origin).hostname).toLowerCase();
     return host === '127.0.0.1' || host === 'localhost' || host === '::1';
   } catch {
     return false;
@@ -165,7 +166,7 @@ function sanitizeUrl(value: string): string {
 function sanitizeLoopbackUrl(value: string): string {
   const url = sanitizeUrl(value);
   const parsed = new URL(url);
-  const host = parsed.hostname.toLowerCase();
+  const host = normalizeSocketHostname(parsed.hostname).toLowerCase();
   if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') throw new Error('endpoint-must-be-loopback');
   return url;
 }
