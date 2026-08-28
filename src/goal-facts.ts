@@ -41,7 +41,10 @@ export interface GoalFacts {
 
 const RESULT_TEXT_CAP = 800;
 const COMMAND_KEYS = ['command', 'cmd', 'script', 'command_line'];
-const PATH_KEYS = ['file_path', 'path', 'filepath', 'target'];
+const PATH_KEYS = [
+  'file_path', 'path', 'filepath', 'target',
+  'old_path', 'new_path', 'src', 'dest', 'old_file', 'new_file',
+];
 
 export function parseArgsJson(raw: string): Record<string, unknown> | undefined {
   try {
@@ -69,11 +72,16 @@ export function extractCommand(args: Record<string, unknown>): string | undefine
 }
 
 export function extractFilePath(args: Record<string, unknown>): string | undefined {
+  return extractFilePaths(args)[0];
+}
+
+export function extractFilePaths(args: Record<string, unknown>): string[] {
+  const paths: string[] = [];
   for (const key of PATH_KEYS) {
     const value = args[key];
-    if (typeof value === 'string' && value.trim() !== '') return value;
+    if (typeof value === 'string' && value.trim() !== '' && !paths.includes(value)) paths.push(value);
   }
-  return undefined;
+  return paths;
 }
 
 export function classifyCommand(command: string): ActionKind[] {
@@ -296,6 +304,22 @@ export function commandForCall(
     return args === undefined ? undefined : extractCommand(args);
   }
   return undefined;
+}
+
+export function filePathsForCall(
+  events: readonly { type: string; data?: unknown }[] | undefined,
+  callId?: string,
+): string[] {
+  if (events === undefined || callId === undefined) return [];
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue;
+    const data = event.data as Record<string, unknown> | undefined;
+    if (data === undefined || data.callId !== callId) continue;
+    const raw = typeof data.arguments === 'string' ? data.arguments : '';
+    const args = raw === '' ? undefined : parseArgsJson(raw);
+    return args === undefined ? [] : extractFilePaths(args);
+  }
+  return [];
 }
 
 export function changedFileCountOf(events: readonly { type: string; data?: unknown }[] | undefined): number {

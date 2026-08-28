@@ -19,6 +19,11 @@ export interface ConstraintDecision {
     action_class?: ActionClass;
     kind?: ActionKind;
 }
+export declare function hasShellControlOperator(command: string): boolean;
+/** True only when the complete shell payload is one recognized test command. */
+export declare function isCompleteTestCommand(command: string): boolean;
+/** True only when the complete shell payload is one recognized build command. */
+export declare function isCompleteBuildCommand(command: string): boolean;
 export declare function parseExecutionMode(value: unknown): ExecutionMode;
 export declare function defaultConstraintsForMode(mode: ExecutionMode): GoalConstraints;
 /** Later values may only tighten. An omitted field does not relax an earlier one. */

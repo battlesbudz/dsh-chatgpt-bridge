@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ExecutionIdempotencyManager } from '../../lib/execution-idempotency.js';
+import { ExecutionIdempotencyManager, idempotencyKindFor } from '../../lib/execution-idempotency.js';
 
 test('R7 / A10: Repeated test suite with identical fingerprint returns SKIPPED_ALREADY_VERIFIED', () => {
   const manager = new ExecutionIdempotencyManager();
@@ -112,4 +112,25 @@ test('ExecutionIdempotencyManager enforces FIFO cap on evidence cache', () => {
   assert.equal(manager.check('fp-1'), null);
   assert.ok(manager.check('fp-2'));
   assert.ok(manager.check('fp-4'));
+});
+
+test('compound test payload is not classified as reusable test evidence', () => {
+  assert.equal(idempotencyKindFor('bash', 'npm test && curl https://example.invalid'), undefined);
+  assert.equal(idempotencyKindFor('bash', 'npm publish && curl https://example.invalid'), undefined);
+  assert.equal(idempotencyKindFor('cmd', 'npm test %DSH_INJECT%'), undefined);
+  assert.equal(idempotencyKindFor('bash', 'npm test'), 'test');
+});
+
+test('evidence can be listed by the sessions that recorded or reused it', () => {
+  const manager = new ExecutionIdempotencyManager();
+  manager.recordSuccess('fp-session', {
+    kind: 'test',
+    sessionId: 'session-a',
+    workspacePath: 'D:/workspace/repo',
+  });
+  assert.equal(manager.listEvidence({ sessionId: 'session-a' }).length, 1);
+  assert.equal(manager.listEvidence({ sessionId: 'session-b' }).length, 0);
+
+  assert.ok(manager.check('fp-session', { sessionId: 'session-b', workspacePath: 'D:/workspace/repo' }));
+  assert.equal(manager.listEvidence({ sessionId: 'session-b' }).length, 1);
 });

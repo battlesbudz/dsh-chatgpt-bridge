@@ -6,12 +6,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { GoalRecord } from './goal-control.js';
 import { foldRevisionHistory, goalCardLabel } from './goal-control.js';
+import { isTerminalStatus } from './goal.js';
 import type { BridgeStatus } from './status.js';
 import { foldGoalFacts, type LooseEvent, type ToolFact } from './goal-facts.js';
 import { containsSecret } from './redact.js';
 
 export interface ResultSchema {
-  status: 'completed' | 'failed' | 'cancelled' | 'blocked';
+  status: BridgeStatus;
   goal: {
     goal_id: string;
     revision: number;
@@ -382,25 +383,16 @@ export function buildResultSchema(input: {
 
   const leak = scanSecretLeak(facts, changedFiles);
   const history = input.record === undefined ? [] : foldRevisionHistory(input.record);
-  const mappedStatus: ResultSchema['status'] =
-    input.status === 'completed'
-      ? 'completed'
-      : input.status === 'cancelled'
-        ? 'cancelled'
-        : input.status === 'blocked'
-          ? 'blocked'
-          : 'failed';
-
   const warnings = unique([...(input.warnings ?? []), ...leak.warnings]);
 
   return {
-    status: mappedStatus,
+    status: input.status,
     goal: {
       goal_id: input.record?.goal_id ?? `goal-${input.sessionId}`,
       revision: input.record?.revision ?? 1,
       workspace: input.workspace,
       started_at: input.record?.created_at,
-      finished_at: new Date().toISOString(),
+      ...(isTerminalStatus(input.status) ? { finished_at: new Date().toISOString() } : {}),
       card: goalCardLabel({ revision: input.record?.revision ?? 1 }),
       revision_history_folded: history.length > 1,
       revision_history: history,

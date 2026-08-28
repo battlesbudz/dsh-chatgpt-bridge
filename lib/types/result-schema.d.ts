@@ -2,7 +2,7 @@ import type { GoalRecord } from './goal-control.js';
 import type { BridgeStatus } from './status.js';
 import { type LooseEvent, type ToolFact } from './goal-facts.js';
 export interface ResultSchema {
-    status: 'completed' | 'failed' | 'cancelled' | 'blocked';
+    status: BridgeStatus;
     goal: {
         goal_id: string;
         revision: number;

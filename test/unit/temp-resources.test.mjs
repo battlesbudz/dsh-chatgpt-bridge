@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { foldGoalFacts } from '../../lib/goal-facts.js';
 import { normalizePath } from '../../lib/bridge.js';
+import { isPathInsideWorkspace } from '../../lib/paths.js';
 import {
   cleanupTempResources,
   discoverTempResources,
@@ -42,6 +43,27 @@ test('workspace root and paths outside the workspace are not safe to delete', ()
   const inside = join(WORKSPACE, 'sub', 'file');
   assert.equal(resolveInsideWorkspace(inside, WORKSPACE), inside);
   assert.equal(isSafeToDelete(owned(inside), WORKSPACE), true);
+});
+
+test('approval path containment accepts workspace paths and rejects traversal/siblings', () => {
+  assert.equal(isPathInsideWorkspace('src/file.ts', WORKSPACE), true);
+  assert.equal(isPathInsideWorkspace(WORKSPACE, WORKSPACE), true);
+  assert.equal(isPathInsideWorkspace(join(WORKSPACE, '..', 'outside.ts'), WORKSPACE), false);
+  assert.equal(isPathInsideWorkspace(`${WORKSPACE}2${sep}file.ts`, WORKSPACE), false);
+});
+
+test('approval path containment rejects a workspace link that resolves outside', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'dsh-bridge-path-workspace-'));
+  const outside = mkdtempSync(join(tmpdir(), 'dsh-bridge-path-outside-'));
+  try {
+    const link = join(workspace, 'linked');
+    symlinkSync(outside, link, isWin ? 'junction' : 'dir');
+    assert.equal(isPathInsideWorkspace(join(link, 'new-file.ts'), workspace), false);
+    assert.equal(isPathInsideWorkspace(join(workspace, 'normal', 'new-file.ts'), workspace), true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test('resolveInsideWorkspace uses the same compare rule as workspace matching', () => {

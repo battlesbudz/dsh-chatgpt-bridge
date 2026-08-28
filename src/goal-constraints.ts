@@ -86,7 +86,28 @@ const HASH_TREE = /Get-FileHash\b[\s\S]*-Recurse|\bhash\b[\s\S]*workspace/i;
 
 const GIT_READ_COMMAND = /\bgit\s+(?:status|diff|log|show|rev-parse|ls-remote|describe|remote|config\s+--get|cat-file|branch(?!\s+-[dD]))\b/i;
 const GIT_MUTATE_COMMAND = /\bgit\s+(?:add|commit|tag(?!\s+-[l\b])|push|reset|checkout\s+-b|merge|rebase|revert|worktree\s+add|branch\s+-[dD])\b/i;
-const SPAWN_COMMAND = /\b(?:npm\s+test|pnpm\s+test|yarn\s+test|node\s+--test|npm\s+run\s+test|jest|vitest|mocha)\b/i;
+const SHELL_CONTROL = /(?:&&|\|\||[;&|<>`\r\n]|\$\(|%[^%\r\n]+%|![^!\r\n]+!)/;
+const TEST_COMMAND = /^(?:npm(?:\.cmd)?\s+(?:test|run\s+test)|pnpm(?:\.cmd)?\s+(?:test|run\s+test)|yarn(?:\.cmd)?\s+(?:test|run\s+test)|node(?:\.exe)?\s+--test|(?:npx(?:\.cmd)?\s+)?(?:jest|vitest|mocha)(?:\.cmd)?)(?:\s+.*)?$/i;
+const BUILD_COMMAND = /^(?:npm(?:\.cmd)?\s+run\s+build|pnpm(?:\.cmd)?\s+(?:build|run\s+build)|yarn(?:\.cmd)?\s+(?:build|run\s+build)|(?:npx(?:\.cmd)?\s+)?(?:tsc|esbuild|webpack)(?:\.cmd)?|(?:npx(?:\.cmd)?\s+)?vite(?:\.cmd)?\s+build)(?:\s+.*)?$/i;
+
+function isCompleteKnownCommand(command: string, pattern: RegExp): boolean {
+  const trimmed = command.trim();
+  return trimmed !== '' && !hasShellControlOperator(trimmed) && pattern.test(trimmed);
+}
+
+export function hasShellControlOperator(command: string): boolean {
+  return SHELL_CONTROL.test(command);
+}
+
+/** True only when the complete shell payload is one recognized test command. */
+export function isCompleteTestCommand(command: string): boolean {
+  return isCompleteKnownCommand(command, TEST_COMMAND);
+}
+
+/** True only when the complete shell payload is one recognized build command. */
+export function isCompleteBuildCommand(command: string): boolean {
+  return isCompleteKnownCommand(command, BUILD_COMMAND);
+}
 
 export function parseExecutionMode(value: unknown): ExecutionMode {
   if (value === 'minimal' || value === 'strict' || value === 'standard') return value;
@@ -169,7 +190,7 @@ export function classesForTool(toolName: string, command?: string): ActionClass[
   if (command !== undefined && command.trim() !== '') {
     if (isWorkspaceScanCommand(command)) out.add('filesystem.scan');
     if (isWriteCommand(command)) out.add('filesystem.write');
-    if (SPAWN_COMMAND.test(command)) out.add('process.spawn');
+    if (isCompleteTestCommand(command)) out.add('process.spawn');
     if (GIT_READ_COMMAND.test(command)) out.add('git.read');
     if (GIT_MUTATE_COMMAND.test(command)) out.add('git.mutate');
     for (const kind of classifyCommand(command)) {

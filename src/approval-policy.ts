@@ -2,7 +2,13 @@
  * Approval Policy v2: Risk-tiered auto-approval, capability grants,
  * and guaranteed reachable terminal states.
  */
-import { classesForTool, type ActionClass } from './goal-constraints.js';
+import {
+  classesForTool,
+  hasShellControlOperator,
+  isCompleteBuildCommand,
+  isCompleteTestCommand,
+  type ActionClass,
+} from './goal-constraints.js';
 
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3';
 export type ApprovalDecision = 'auto_approve' | 'require_human' | 'deny';
@@ -42,9 +48,6 @@ const LOCAL_COMMIT_CMD = /\bgit\s+(?:add|commit)\b/i;
 const GIT_PUSH_CMD = /\bgit\s+push\b/i;
 const NPM_PUBLISH_CMD = /\bnpm\s+publish\b/i;
 const GH_RELEASE_CMD = /\bgh\s+release\b/i;
-const BUILD_CMD = /\b(?:npm\s+run\s+build|pnpm\s+build|tsc|esbuild|webpack|vite\s+build)\b/i;
-const TEST_CMD = /\b(?:npm\s+test|node\s+--test|pnpm\s+test|vitest|jest|mocha)\b/i;
-
 export interface ApprovalEvaluation {
   level: RiskLevel;
   capability: ActionClass | 'danger-full-access' | 'system.destructive';
@@ -56,6 +59,7 @@ export function evaluateApproval(
   toolName: string,
   command?: string,
   policy: UserApprovalPolicy = DEFAULT_APPROVAL_POLICY,
+  context: { externalWrite?: boolean } = {},
 ): ApprovalEvaluation {
   const mergedPolicy: UserApprovalPolicy = { ...DEFAULT_APPROVAL_POLICY, ...policy };
   const cmd = command ?? '';
@@ -94,6 +98,17 @@ export function evaluateApproval(
       capability: 'danger-full-access',
       decision: mergedPolicy.dangerFullAccess === 'deny' ? 'deny' : 'require_human',
       reason: 'Broad danger-full-access grant requires explicit human confirmation',
+    };
+  }
+
+  // A shell payload with control operators is multiple operations. Never let
+  // one recognized prefix grant approval to the rest of the payload.
+  if (cmd !== '' && hasShellControlOperator(cmd)) {
+    return {
+      level: 'L1',
+      capability: 'process.exec',
+      decision: 'require_human',
+      reason: 'Compound shell command requires explicit human confirmation',
     };
   }
 
@@ -140,6 +155,15 @@ export function evaluateApproval(
   }
 
   if (classes.includes('filesystem.write')) {
+    if (context.externalWrite === true) {
+      const dec = mergedPolicy.externalWrite === 'auto' ? 'auto_approve' : 'require_human';
+      return {
+        level: 'L1',
+        capability: 'external_path.write',
+        decision: dec,
+        reason: 'Write outside the managed workspace',
+      };
+    }
     const dec = mergedPolicy.workspaceWrite === 'auto' ? 'auto_approve' : 'require_human';
     return {
       level: 'L1',
@@ -150,7 +174,7 @@ export function evaluateApproval(
   }
 
   // --- L0: Low Risk / Read-Only / Automated test (Default Auto-Approve) ---
-  if (TEST_CMD.test(cmd)) {
+  if (isCompleteTestCommand(cmd)) {
     const dec = mergedPolicy.test === 'ask' ? 'require_human' : 'auto_approve';
     return {
       level: 'L0',
@@ -160,23 +184,13 @@ export function evaluateApproval(
     };
   }
 
-  if (BUILD_CMD.test(cmd)) {
+  if (isCompleteBuildCommand(cmd)) {
     const dec = mergedPolicy.build === 'ask' ? 'require_human' : 'auto_approve';
     return {
       level: 'L0',
       capability: 'process.exec',
       decision: dec,
       reason: 'Build step execution',
-    };
-  }
-
-  if (classes.includes('process.spawn') && !classes.includes('git.mutate') && !classes.includes('npm.publish')) {
-    const dec = mergedPolicy.test === 'ask' ? 'require_human' : 'auto_approve';
-    return {
-      level: 'L0',
-      capability: 'process.spawn',
-      decision: dec,
-      reason: 'Automated test suite execution (process spawn)',
     };
   }
 

@@ -87,3 +87,36 @@ test('R2: build commands follow policy.build independently from policy.test', ()
   assert.equal(testResAuto.decision, 'auto_approve');
   assert.equal(testResAuto.capability, 'process.spawn');
 });
+
+test('complete-command boundary: compound test/build payloads are never auto-approved', () => {
+  for (const command of [
+    'npm test && curl https://example.invalid',
+    'npm run build; mystery-deploy',
+    'node --test test/unit/sample.test.mjs | tee result.txt',
+    'npm publish && curl https://example.invalid',
+    'npm test %DSH_INJECT%',
+    'npm test !DSH_INJECT!',
+  ]) {
+    const result = evaluateApproval('bash', command);
+    assert.equal(result.decision, 'require_human', command);
+  }
+  assert.equal(
+    evaluateApproval('exec_command', 'npm test && curl https://example.invalid').decision,
+    'require_human',
+  );
+  assert.equal(
+    evaluateApproval('bash', 'npm publish && curl https://example.invalid', { npmPublish: 'auto' }).decision,
+    'require_human',
+  );
+});
+
+test('externalWrite is evaluated independently from workspaceWrite', () => {
+  const policy = { workspaceWrite: 'auto', externalWrite: 'ask' };
+  const inside = evaluateApproval('write', undefined, policy, { externalWrite: false });
+  assert.equal(inside.capability, 'filesystem.write');
+  assert.equal(inside.decision, 'auto_approve');
+
+  const outside = evaluateApproval('write', undefined, policy, { externalWrite: true });
+  assert.equal(outside.capability, 'external_path.write');
+  assert.equal(outside.decision, 'require_human');
+});

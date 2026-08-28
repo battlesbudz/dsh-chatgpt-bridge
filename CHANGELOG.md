@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.1 — 2026-08-28
+
+Security and provenance patch for the v0.5 control plane, addressing all six
+findings from the post-merge Codex review of PR #5.
+
+### Fixed
+
+- **Whole-command approval boundary**: test and build auto-approval now requires
+  the complete shell payload to be one recognized command. Compound operators,
+  command substitution, and Windows `%VAR%` / `!VAR!` expansion require human
+  confirmation and are excluded from execution-idempotency caching.
+- **External write policy enforcement**: write/edit targets are resolved against
+  the managed workspace before approval. Outside, missing/unproven, traversal,
+  sibling-prefix, junction, and symlink escape paths use `externalWrite` and
+  fail closed under the default policy.
+- **Truthful structured result status**: `ResultSchema.status` preserves the
+  actual bridge status, and `finished_at` is emitted only for terminal states.
+- **Legacy start-path optimistic locking**: `dsh_start_goal` now enforces
+  `expected_revision` when revising an existing session and returns
+  `REVISION_CONFLICT` for stale clients.
+- **Session-scoped evidence provenance**: structured results list only evidence
+  recorded or explicitly reused by the requested session.
+- **Active-only Goal deduplication**: equivalent Goals reuse only running,
+  queued, or waiting sessions; completed and other terminal sessions no longer
+  suppress repeat work.
+
 ## 0.5.0 — 2026-08-28
 
 Control Plane Reliability & Supervision Evolution: eliminates control-loop churn,

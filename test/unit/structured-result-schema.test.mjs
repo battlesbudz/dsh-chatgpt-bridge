@@ -229,3 +229,25 @@ test('extract helpers parse git and pack evidence', () => {
   ]);
   assert.equal(artifacts[0]?.name, 'pkg-1.0.0.tgz');
 });
+
+test('live structured results preserve running status and omit terminal timestamp', () => {
+  const result = buildResultSchema({
+    sessionId: 'session-running',
+    events: [],
+    status: 'running',
+    workspace: 'D:/ws',
+  });
+  assert.equal(result.status, 'running');
+  assert.equal('finished_at' in result.goal, false);
+});
+
+test('terminal structured results preserve the exact status and include terminal timestamp', () => {
+  const result = buildResultSchema({
+    sessionId: 'session-interrupted',
+    events: [],
+    status: 'interrupted',
+    workspace: 'D:/ws',
+  });
+  assert.equal(result.status, 'interrupted');
+  assert.equal(typeof result.goal.finished_at, 'string');
+});

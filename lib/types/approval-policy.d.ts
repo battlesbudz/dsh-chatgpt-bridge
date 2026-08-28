@@ -25,4 +25,6 @@ export interface ApprovalEvaluation {
     decision: ApprovalDecision;
     reason: string;
 }
-export declare function evaluateApproval(toolName: string, command?: string, policy?: UserApprovalPolicy): ApprovalEvaluation;
+export declare function evaluateApproval(toolName: string, command?: string, policy?: UserApprovalPolicy, context?: {
+    externalWrite?: boolean;
+}): ApprovalEvaluation;

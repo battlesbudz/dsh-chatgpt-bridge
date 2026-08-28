@@ -34,6 +34,7 @@ export interface GoalFacts {
 export declare function parseArgsJson(raw: string): Record<string, unknown> | undefined;
 export declare function extractCommand(args: Record<string, unknown>): string | undefined;
 export declare function extractFilePath(args: Record<string, unknown>): string | undefined;
+export declare function extractFilePaths(args: Record<string, unknown>): string[];
 export declare function classifyCommand(command: string): ActionKind[];
 export declare function tokenize(text: string): string[];
 export declare function parseWorktreeAddPath(command: string): string | undefined;
@@ -48,6 +49,10 @@ export declare function commandForCall(events: readonly {
     type: string;
     data?: unknown;
 }[] | undefined, callId?: string): string | undefined;
+export declare function filePathsForCall(events: readonly {
+    type: string;
+    data?: unknown;
+}[] | undefined, callId?: string): string[];
 export declare function changedFileCountOf(events: readonly {
     type: string;
     data?: unknown;

@@ -4,7 +4,7 @@
 
 An MCP bridge that lets **ChatGPT Web** create, view, continue and supervise
 **DeepSeek Harness (DSH)** agent sessions through the official **Model Context
-Protocol**. v0.5.0 — *Control Plane Reliability* on DSH 0.1.1-rc.2.
+Protocol**. v0.5.1 — *Control Plane Reliability security patch* on DSH 0.1.1-rc.2.
 The v0.3.0 Goal Control Plane and v0.4.0 Native Settings are preserved. The bridge only
 *connects* — DSH keeps its own session log, agent loop, tools, skills,
 subagents, workflows, approvals, sandbox and workspace security model. It is a
@@ -17,7 +17,7 @@ standalone DSH plugin: **zero DSH core modifications**.
 
 > Self-hosted / dogfooding development: implemented against DeepSeek
 > Harness and verified end-to-end against live local DSH
-> runtimes through `0.1.1-rc.1` with the official MCP SDK client. The v0.5.0
+> runtimes through `0.1.1-rc.1` with the official MCP SDK client. The v0.5.1
 > release targets `0.1.1-rc.2` and has passed the automated gates below; a
 > fresh live-runtime E2E remains a separately reported verification boundary.
 
@@ -30,7 +30,7 @@ preparing compatibility releases, preserving MCP tool/schema behavior, testing
 runtime lifecycle and security-sensitive tunnel changes, and keeping install
 and operational documentation current.
 
-The current release is `dsh-chatgpt-bridge@0.5.0` and targets DSH
+The current release is `dsh-chatgpt-bridge@0.5.1` and targets DSH
 `0.1.1-rc.2`; see the [compatibility matrix](#compatibility-matrix) for the
 automated and live-runtime evidence boundary.
 
@@ -192,10 +192,10 @@ Expected:
 
 ```text
 health = ok
-bridge version = 0.5.0
+bridge version = 0.5.1
 ```
 
-The v0.5.0 npm package and a source install from this tag both report `0.5.0`.
+The v0.5.1 npm package and a source install from this tag both report `0.5.1`.
 
 Then a minimal Goal Supervision example (still read-only):
 
@@ -364,7 +364,7 @@ After completing Quick Start steps 1–3:
 4. Ask ChatGPT to call `dsh_health`.
 5. Confirm:
    - `health = ok`
-   - `bridge version = 0.5.0`
+   - `bridge version = 0.5.1`
    - **tool count = 23**
    - `dsh_create_goal`, `dsh_rerun_step`, and
      `dsh_wait_until_action_required` exist in the tool list
@@ -424,7 +424,7 @@ The bridge uses DSH's public plugin seams — it never re-implements DSH:
 
 ## Detailed install
 
-The plugin is a standard DSH profile bundle. The v0.5.0 release targets DSH
+The plugin is a standard DSH profile bundle. The v0.5.1 release targets DSH
 `0.1.1-rc.2`.
 
 **Recommended: one DSH runtime for both Web `:3080` and the MCP bridge `:3456`.**
@@ -439,7 +439,7 @@ The Quick Start uses `dsh plugin --profile web add dsh-chatgpt-bridge`. If
 `dsh` is not on your `PATH`, the equivalent is:
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile web add dsh-chatgpt-bridge@0.5.0
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile web add dsh-chatgpt-bridge@0.5.1
 
 # boot ONE process — Web :3080 and MCP :3456
 pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 --profile web
@@ -455,8 +455,8 @@ and can be resumed later, but DSH Web `:3080` will not stream them in real
 time.
 
 ```bash
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.5.0
-pnpm dlx @deepseek-ai/dsh@0.1.1-rc.1 --profile chatgpt-bridge
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 plugin --profile chatgpt-bridge add dsh-chatgpt-bridge@0.5.1
+pnpm dlx @deepseek-ai/dsh@0.1.1-rc.2 --profile chatgpt-bridge
 ```
 
 The published npm package is available at
@@ -819,6 +819,7 @@ DSH core modifications: **0**.
 
 | dsh-chatgpt-bridge | DeepSeek Harness | Status | Evidence / notes |
 | --- | --- | --- | --- |
+| `v0.5.1` | `0.1.1-rc.2` | Published / automated verified | All six Codex PR #5 findings fixed; typecheck/build and 385-test local suite passed (384 pass, 1 Windows platform skip); package dry-run passed; fresh real DSH/ChatGPT UI validation remains pending |
 | `v0.5.0` | `0.1.1-rc.2` | Published / automated verified | Typecheck/build and 373-test local suite passed (372 pass, 1 Windows platform skip); production audit is 0 vulnerabilities; package and clean temporary tarball install/import passed; fresh real DSH/ChatGPT UI validation remains pending |
 | `0.4.2` (unpublished snapshot) | `0.1.1-rc.2` | Historical local gate | Compatibility and security hardening was folded into the subsequent v0.5.0 worktree; never tagged or published |
 | `v0.4.1` | `0.1.1-rc.1` | Published / verified | Tag manifest and compatibility release |

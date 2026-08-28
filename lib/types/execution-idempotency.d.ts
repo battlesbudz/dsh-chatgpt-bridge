@@ -6,6 +6,8 @@ export interface ExecutionEvidence {
     status: 'passed' | 'applied' | 'verified';
     summary?: string;
     details?: Record<string, unknown>;
+    sessionIds?: string[];
+    workspacePath?: string;
 }
 export interface IdempotencyCheckResult {
     isIdempotent: boolean;
@@ -40,13 +42,21 @@ export declare class ExecutionIdempotencyManager {
         status?: 'passed' | 'applied' | 'verified';
         summary?: string;
         details?: Record<string, unknown>;
+        sessionId?: string;
+        workspacePath?: string;
     }): ExecutionEvidence;
     /**
      * Check if an identical operation has already succeeded with valid evidence.
      */
-    check(fingerprint: string): IdempotencyCheckResult | null;
+    check(fingerprint: string, scope?: {
+        sessionId?: string;
+        workspacePath?: string;
+    }): IdempotencyCheckResult | null;
     /** Drop cached evidence for a kind so an explicit rerun can execute again. */
     invalidateKind(kind: string): number;
-    listEvidence(): ExecutionEvidence[];
+    listEvidence(filter?: {
+        sessionId?: string;
+        workspacePath?: string;
+    }): ExecutionEvidence[];
     clear(): void;
 }

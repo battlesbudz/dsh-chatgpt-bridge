@@ -114,6 +114,15 @@ function toolCall(seq, callId, command) {
   };
 }
 
+function fileToolCall(seq, callId, name, args) {
+  return {
+    type: 'tool/call',
+    seq,
+    time: seq,
+    data: { turn: 1, callId, name, arguments: JSON.stringify(args) },
+  };
+}
+
 function toolResult(seq, callId, content, isError = false) {
   return {
     type: 'tool/result',
@@ -139,6 +148,59 @@ test('R1 / A01: identical Goal sent three times reuses one session and does not 
   assert.equal(third.revision_unchanged, true);
   assert.equal(first.goal?.revision ?? 1, 1);
   assert.equal(second.goal?.revision ?? 1, 1);
+});
+
+test('terminal identical Goals are not reused as active sessions', async () => {
+  const { bridge, agents, created } = makeStatefulBridge();
+  const input = { workspace: 'ws-1', goal: 'Run the full npm test suite' };
+  const first = await bridge.startGoal(input);
+  const agent = agents.get(first.session_id);
+  agent.status = 'idle';
+  agent.inbox.hasPending = false;
+  agent.inbox.nextTurn = [];
+  agent.inbox.nextStep = [];
+  agent.session.events.push({
+    type: 'turn/end',
+    seq: 1,
+    time: 1,
+    data: { turn: 1, reason: { kind: 'completed' } },
+  });
+  assert.equal((await bridge.getTaskStatus(first.session_id)).status, 'completed');
+
+  const second = await bridge.startGoal(input);
+  assert.notEqual(second.session_id, first.session_id);
+  assert.equal(created.length, 2);
+});
+
+test('startGoal enforces expected_revision on an existing session', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const first = await bridge.startGoal({ workspace: 'ws-1', goal: 'Prepare release candidate 1' });
+  const agent = agents.get(first.session_id);
+  const followupsBefore = agent.followupCount;
+
+  await assert.rejects(
+    () => bridge.startGoal({
+      workspace: 'ws-1',
+      session_id: first.session_id,
+      goal: 'Prepare release candidate 2',
+      expected_revision: 0,
+    }),
+    (error) => {
+      assert.ok(error instanceof BridgeError);
+      assert.equal(error.code, 'REVISION_CONFLICT');
+      return true;
+    },
+  );
+  assert.equal(bridge.goalStore.get(first.session_id)?.revision, 1);
+  assert.equal(agent.followupCount, followupsBefore);
+
+  const revised = await bridge.startGoal({
+    workspace: 'ws-1',
+    session_id: first.session_id,
+    goal: 'Prepare release candidate 2',
+    expected_revision: 1,
+  });
+  assert.equal(revised.goal?.revision, 2);
 });
 
 test('R4 / A07: second mutable Goal on the same workspace is locked without override', async () => {
@@ -217,6 +279,23 @@ test('R5 / A05: when approve is blocked by the platform layer, reject and stop s
   assert.equal(await parkedAgain, 'cancelled');
 });
 
+test('write approval distinguishes workspace paths from external paths', async () => {
+  const { bridge, agents } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'Update one file' });
+  const agent = agents.get(started.session_id);
+
+  agent.session.events.push(fileToolCall(1, 'c-inside', 'write', { file_path: 'src/inside.ts', content: 'x' }));
+  assert.equal(await bridge.decideApproval({ agent, toolName: 'write', callId: 'c-inside' }), 'approved');
+
+  agent.session.events.push(fileToolCall(2, 'c-outside', 'write', { file_path: '..\\outside.ts', content: 'x' }));
+  const parked = bridge.decideApproval({ agent, toolName: 'write', callId: 'c-outside' });
+  const approvalId = await waitForApproval(bridge);
+  const pending = bridge['approvals'].get(approvalId);
+  assert.equal(pending.capability, 'external_path.write');
+  assert.equal(await bridge.approve(started.session_id, approvalId, 'reject').then((item) => item.outcome), 'rejected');
+  assert.equal(await parked, 'rejected');
+});
+
 test('R7 / A10: duplicate npm test after observed PASS is skipped with SKIPPED_ALREADY_VERIFIED', async () => {
   const { bridge, agents } = makeStatefulBridge();
   const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'Run the full npm test suite' });
@@ -233,6 +312,19 @@ test('R7 / A10: duplicate npm test after observed PASS is skipped with SKIPPED_A
 
   const status = await bridge.getTaskStatus(started.session_id);
   assert.ok(status.history?.some((event) => event.type === 'step_skipped' && event.metadata?.code === 'SKIPPED_ALREADY_VERIFIED'));
+});
+
+test('structured result excludes evidence owned only by another session', async () => {
+  const { bridge } = makeStatefulBridge();
+  const started = await bridge.startGoal({ workspace: 'ws-1', goal: 'Inspect current state' });
+  bridge.idempotencyManager.recordSuccess('foreign-fingerprint', {
+    kind: 'test',
+    sessionId: 'another-session',
+    workspacePath: MIX.path,
+  });
+
+  const result = await bridge.getStructuredResult(started.session_id);
+  assert.deepEqual(result.tests.evidence_ids, []);
 });
 
 test('R8 / A11: duplicate npm publish after observed success is skipped with SKIPPED_ALREADY_APPLIED', async () => {

@@ -51,6 +51,7 @@ import {
   fingerprintStart,
   isActiveStatus,
   isTerminalStatus,
+  isWaitingStatus,
   mapStartGoal,
   mapWaitGoal,
   titleFromGoal,
@@ -61,6 +62,7 @@ import {
 import {
   changedFileCountOf,
   commandForCall,
+  filePathsForCall,
   foldGoalFacts,
   successfulKinds,
   type ActionKind,
@@ -108,6 +110,7 @@ import { evaluateApproval, DEFAULT_APPROVAL_POLICY, type UserApprovalPolicy } fr
 import { WorkspaceConcurrencyGuard, type WorkspaceBaseline } from './workspace-guard.js';
 import { ExecutionIdempotencyManager, idempotencyKindFor, isVerifiedKind } from './execution-idempotency.js';
 import { buildResultSchema, inspectCredentials, type ResultSchema, type CredentialStatus } from './result-schema.js';
+import { isPathInsideWorkspace } from './paths.js';
 import { SecretStore } from './control/secret-store.js';
 import {
   asApiProxy,
@@ -1133,7 +1136,7 @@ export class Bridge {
       events: view.events,
       status,
       workspace,
-      evidenceIds: this.idempotencyManager.listEvidence().map((item) => item.evidenceId),
+      evidenceIds: this.idempotencyManager.listEvidence({ sessionId }).map((item) => item.evidenceId),
       credentialRefs: this.getCredentialStatus()
         .filter((item) => item.credentialAvailable)
         .map((item) => item.credentialRef),
@@ -1219,6 +1222,9 @@ export class Bridge {
       for (const agent of activeSessions) {
         const record = this.goalStore.get(agent.id);
         if (record !== undefined && pathsEqual(agent.session.header?.cwd ?? '', workspacePath)) {
+          const view = await this.loadView(agent.id);
+          const status = await this.statusOf(agent.id, view);
+          if (!isActiveStatus(status) && !isWaitingStatus(status)) continue;
           if (isGoalSemanticallyEqual(record, input.goal, input.plan, input.execution_mode, input.constraints)) {
             reusedSessionId = agent.id;
             break;
@@ -1244,10 +1250,21 @@ export class Bridge {
       this.adopt(sessionId);
     }
 
+    const existingRecord = this.goalStore.get(sessionId);
+    if (
+      input.expected_revision !== undefined
+      && existingRecord !== undefined
+      && input.expected_revision !== existingRecord.revision
+    ) {
+      throw new BridgeError(
+        'REVISION_CONFLICT',
+        `expected_revision mismatch: expected ${input.expected_revision}, but current revision is ${existingRecord.revision}`,
+      );
+    }
+
     await this.takeWorkspaceLock(workspacePath, sessionId, lockOverride, isReadOnly);
 
     // 3. Goal Deduplication on existing session
-    const existingRecord = this.goalStore.get(sessionId);
     if (
       existingRecord !== undefined &&
       isGoalSemanticallyEqual(existingRecord, input.goal, input.plan, input.execution_mode, input.constraints)
@@ -1491,6 +1508,7 @@ export class Bridge {
     plan?: string;
     execution_mode?: ExecutionMode;
     constraints?: GoalConstraints;
+    expected_revision?: number;
   }): GoalRecord {
     const existing = this.goalStore.get(sessionId);
     const mode = parseExecutionMode(input.execution_mode);
@@ -1514,6 +1532,7 @@ export class Bridge {
       plan: input.plan,
       mode,
       constraints,
+      ...(input.expected_revision === undefined ? {} : { expectedRevision: input.expected_revision }),
       deferredStepIds: detected,
       revisionReason: 'user_modified_goal',
       now: this.now(),
@@ -1567,9 +1586,21 @@ export class Bridge {
     if (!this.managed.has(request.agent.id)) return next();
 
     const command = commandForCall(request.agent.session?.events, request.callId);
-    const evalDecision = evaluateApproval(request.toolName, command, this.approvalPolicy);
     const workspacePath = request.agent.session?.header?.cwd
       ?? this.workspaceBaselines.get(request.agent.id)?.workspacePath;
+    const writeOperation = classesForTool(request.toolName, command).includes('filesystem.write');
+    const targetPaths = filePathsForCall(request.agent.session?.events, request.callId);
+    const externalWrite = writeOperation && (
+      workspacePath === undefined
+      || targetPaths.length === 0
+      || targetPaths.some((path) => !isPathInsideWorkspace(path, workspacePath))
+    );
+    const evalDecision = evaluateApproval(
+      request.toolName,
+      command,
+      this.approvalPolicy,
+      { externalWrite },
+    );
     if (workspacePath !== undefined && workspacePath !== '') {
       this.recordObservedExecutionFacts(
         request.agent.id,
@@ -2077,7 +2108,7 @@ export class Bridge {
       headSha: snapshot?.headSha,
       extra: this.executionFingerprintExtra(snapshot),
     });
-    const hit = this.idempotencyManager.check(fingerprint);
+    const hit = this.idempotencyManager.check(fingerprint, { sessionId, workspacePath });
     if (hit === null) {
       if (callId !== undefined) {
         this.rememberPendingExecutionFingerprint(`${sessionId}:${callId}`, { kind, fingerprint });
@@ -2146,11 +2177,13 @@ export class Bridge {
             headSha: baseline?.headSha,
             extra: this.executionFingerprintExtra(baseline),
           });
-      if (this.idempotencyManager.check(fingerprint) !== null) continue;
+      if (this.idempotencyManager.check(fingerprint, { sessionId, workspacePath }) !== null) continue;
       this.idempotencyManager.recordSuccess(fingerprint, {
         kind,
         status: isVerifiedKind(kind) ? 'passed' : 'applied',
         summary: tool.resultText,
+        sessionId,
+        workspacePath,
       });
     }
   }

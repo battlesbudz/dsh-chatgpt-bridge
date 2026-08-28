@@ -174,7 +174,7 @@ test('test runner selects the Node 22 isolation spelling before running the suit
   assert.doesNotMatch(runner, /result\.status\s*===\s*9/);
 });
 
-test('v0.5.0 README and Goal dogfood stay aligned with the shipped control-plane surface', () => {
+test('current README and Goal dogfood stay aligned with the shipped control-plane surface', () => {
   const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   const readme = readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
   const dogfood = readFileSync(new URL('../../scripts/goal-control-dogfood.mjs', import.meta.url), 'utf8');
