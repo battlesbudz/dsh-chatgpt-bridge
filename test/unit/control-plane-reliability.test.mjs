@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { Bridge, BridgeError } from '../../lib/bridge.js';
 
 const MIX = {
@@ -287,7 +288,7 @@ test('write approval distinguishes workspace paths from external paths', async (
   agent.session.events.push(fileToolCall(1, 'c-inside', 'write', { file_path: 'src/inside.ts', content: 'x' }));
   assert.equal(await bridge.decideApproval({ agent, toolName: 'write', callId: 'c-inside' }), 'approved');
 
-  agent.session.events.push(fileToolCall(2, 'c-outside', 'write', { file_path: '..\\outside.ts', content: 'x' }));
+  agent.session.events.push(fileToolCall(2, 'c-outside', 'write', { file_path: join('..', 'outside.ts'), content: 'x' }));
   const parked = bridge.decideApproval({ agent, toolName: 'write', callId: 'c-outside' });
   const approvalId = await waitForApproval(bridge);
   const pending = bridge['approvals'].get(approvalId);
