@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { redactText, redactValue, redactMessage } from '../../lib/redact.js';
+import { containsSecret, redactText, redactValue, redactMessage } from '../../lib/redact.js';
+
+test('containsSecret detects secret-shaped text without being stateful across calls', () => {
+  assert.equal(containsSecret('api_key=super-secret-value-12345'), true);
+  assert.equal(containsSecret('api_key=super-secret-value-12345'), true);
+  assert.equal(containsSecret('no secrets here'), false);
+});
 
 test('redactText masks OpenAI-style keys (Case 8: sk-test-DO-NOT-LOG)', () => {
   const out = redactText('the key is sk-test-DO-NOT-LOG-1234567890 and more');

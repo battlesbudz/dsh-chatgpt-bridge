@@ -4,7 +4,7 @@
  */
 import { type ActionKind, type GoalFacts, type ToolFact } from './goal-facts.js';
 export type ExecutionMode = 'standard' | 'minimal' | 'strict';
-export type ActionClass = 'filesystem.read' | 'filesystem.write' | 'filesystem.scan' | 'process.exec' | 'git.mutate' | 'npm.publish' | 'github.release' | 'network';
+export type ActionClass = 'filesystem.read' | 'filesystem.write' | 'filesystem.scan' | 'process.exec' | 'process.spawn' | 'git.read' | 'git.mutate' | 'npm.publish' | 'github.release' | 'network' | 'credentials.metadata' | 'workspace.read' | 'workspace.write' | 'temp.read' | 'temp.write' | 'external_path.read' | 'external_path.write';
 export declare const ACTION_CLASSES: readonly ActionClass[];
 export interface GoalConstraints {
     read_only?: boolean;

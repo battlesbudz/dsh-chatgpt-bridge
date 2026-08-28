@@ -21,7 +21,32 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     resultMaxItems: import("@deepseek-ai/schemastery").default<number, number>;
     sessionMaxItems: import("@deepseek-ai/schemastery").default<number, number>;
     sessionMaxChars: import("@deepseek-ai/schemastery").default<number, number>;
-    logLevel: import("@deepseek-ai/schemastery").default<"debug" | "info" | "warn" | "error", "debug" | "info" | "warn" | "error">;
+    logLevel: import("@deepseek-ai/schemastery").default<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn">;
+    approvalPolicy: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
+        read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        test: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        build: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        localCommit: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        externalWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        gitPush: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        npmPublish: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        githubRelease: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        secrets: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+    }>, Schemastery.ObjectT<{
+        read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        test: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        build: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        localCommit: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        externalWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        gitPush: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        npmPublish: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        githubRelease: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        secrets: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+    }>>;
 }>, Schemastery.ObjectT<{
     transport: import("@deepseek-ai/schemastery").default<"http" | "stdio", "http" | "stdio">;
     host: import("@deepseek-ai/schemastery").default<string, string>;
@@ -34,6 +59,31 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     resultMaxItems: import("@deepseek-ai/schemastery").default<number, number>;
     sessionMaxItems: import("@deepseek-ai/schemastery").default<number, number>;
     sessionMaxChars: import("@deepseek-ai/schemastery").default<number, number>;
-    logLevel: import("@deepseek-ai/schemastery").default<"debug" | "info" | "warn" | "error", "debug" | "info" | "warn" | "error">;
+    logLevel: import("@deepseek-ai/schemastery").default<"error" | "debug" | "info" | "warn", "error" | "debug" | "info" | "warn">;
+    approvalPolicy: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
+        read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        test: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        build: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        localCommit: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        externalWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        gitPush: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        npmPublish: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        githubRelease: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        secrets: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+    }>, Schemastery.ObjectT<{
+        read: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        test: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        build: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        workspaceWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        localCommit: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        externalWrite: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        gitPush: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        npmPublish: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        githubRelease: import("@deepseek-ai/schemastery").default<"auto" | "ask", "auto" | "ask">;
+        secrets: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+        dangerFullAccess: import("@deepseek-ai/schemastery").default<"deny" | "ask", "deny" | "ask">;
+    }>>;
 }>>;
 export declare function apply(ctx: Context, config: BridgeConfigInput): void;

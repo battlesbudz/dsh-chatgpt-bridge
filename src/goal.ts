@@ -4,7 +4,7 @@
  */
 import type { ActionKind } from './goal-facts.js';
 import type { GoalHistoryEvent, GoalRecord, GoalSupervisionView } from './goal-control.js';
-import { revisionBanner } from './goal-control.js';
+import { foldRevisionHistory, goalCardLabel, revisionBanner } from './goal-control.js';
 import type { ExecutionMode, GoalConstraints } from './goal-constraints.js';
 import { parseExecutionMode } from './goal-constraints.js';
 import type { BlockedInfo, GoalGraph } from './goal-graph.js';
@@ -99,6 +99,22 @@ export function buildGoalMessage(goal: string, plan?: string, options?: GoalMess
   return lines.join('\n\n');
 }
 
+export function foldedGoalDisplay(record: GoalRecord): string {
+  const card = goalCardLabel(record);
+  const history = foldRevisionHistory(record);
+  if (history.length <= 1) {
+    return `Display this as a single Goal card: "${card}". This is one supervised Goal, not multiple agents.`;
+  }
+  const trail = history
+    .map((item) => `rev${item.revision} (${item.revision_reason})`)
+    .join(' → ');
+  return [
+    `Display this as a single Goal card: "${card}".`,
+    `Revision history rev 1→${record.revision} is folded under that card; this is not a new session, agent, or Goal.`,
+    `Folded history: ${trail}.`,
+  ].join('\n');
+}
+
 /** Full Agent-turn payload: [Goal] banner + authority rules + goal/plan/mode. */
 export function buildSupervisedGoalContext(
   record: GoalRecord,
@@ -109,6 +125,7 @@ export function buildSupervisedGoalContext(
 ): string {
   return [
     revisionBanner(record),
+    foldedGoalDisplay(record),
     SUPERVISED_GOAL_AUTHORITY,
     `Supervised identity: goal_id=${record.goal_id} revision=${record.revision} mode=${record.mode}.`,
     buildGoalMessage(goal, plan, {
@@ -213,6 +230,11 @@ export interface GoalStartResult {
   continuation_required: boolean;
   next_action: string;
   next_tool_call?: GoalToolCall;
+  existing_goal_reused?: boolean;
+  revision_unchanged?: boolean;
+  conflicts?: string[];
+  evidence_id?: string;
+  workspace_lock_acquired?: boolean;
   goal?: GoalSupervisionView;
   execution?: ExecutionSupervisionView;
   history?: GoalHistoryEvent[];

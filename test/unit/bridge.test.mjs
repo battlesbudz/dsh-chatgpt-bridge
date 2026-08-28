@@ -483,7 +483,7 @@ test('waitGoal on persisted session has no Goal DB (Case 12)', async () => {
 test('startGoal sessions stay isolated (Case 13)', async () => {
   const { bridge, agents } = makeStatefulBridge();
   const a = await bridge.startGoal({ workspace: 'ws-1', goal: 'A' });
-  const b = await bridge.startGoal({ workspace: 'ws-1', goal: 'B' });
+  const b = await bridge.startGoal({ workspace: 'ws-1', goal: 'B', workspace_lock_override: true });
   assert.notEqual(a.session_id, b.session_id);
   agents.get(a.session_id).status = 'running';
   await bridge.stopGoal(a.session_id);
@@ -519,12 +519,14 @@ function settle(agent) {
   agent.inbox.nextTurn = [];
 }
 
-test('MCP surface exposes 15 dsh_* tools (v0.3.0 adds dsh_update_goal)', async () => {
+test('MCP surface exposes 23 dsh_* tools (v0.5.0 Control Plane Reliability)', async () => {
   const src = await import('node:fs');
   const text = src.readFileSync(new URL('../../src/mcp.ts', import.meta.url), 'utf8');
   const count = [...text.matchAll(/server\.registerTool\(/g)].length;
-  assert.equal(count, 15);
+  assert.equal(count, 23);
   assert.match(text, /dsh_update_goal/);
+  assert.match(text, /dsh_create_goal/);
+  assert.match(text, /dsh_revise_goal/);
 });
 
 test('Test A — waitGoal/terminal reconciles pending push todo after git push succeeds', async () => {

@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.5.0 — 2026-08-28
+
+Control Plane Reliability & Supervision Evolution: eliminates control-loop churn,
+provides static goal preflight validation, safe tiered approval defaults,
+single-mutable workspace locks, execution idempotency, and standardized result schemas.
+
+### Added
+
+- **1 Task = 1 Goal Deduplication**: Equivalent goals on a workspace reuse existing active Goal sessions idempotently (`existing_goal_reused: true, revision_unchanged: true`).
+- **Goal Preflight Validator (`validateGoalPreflight`)**: Statically validates goal/plan text against constraints before agent startup (`read_only` vs edit/commit, forbidden tool actions), returning structured conflict diagnostics (`GOAL_INVALID`).
+- **Approval Policy v2 (`UserApprovalPolicy`)**: Tiered L0-L3 capability evaluation. Auto-approves safe read/test actions (`npm test`, `git.read`, non-destructive subagents) with 0 manual prompts, while safeguarding high-risk operations (force push, raw secret access).
+- **Workspace Concurrency Guard (`WorkspaceConcurrencyGuard`)**: Single mutable session lock per workspace with Git HEAD plus tracked/staged/untracked working-tree fingerprint capture, cross-session mutation tracking, and pre-mutation drift detection (`WORKSPACE_DRIFT`).
+- **Execution Idempotency (`ExecutionIdempotencyManager`)**: SHA-256 fingerprinting for high-cost steps (test suites, npm publish) includes the live workspace fingerprint and non-secret Node/platform identity, returning cached evidence (`SKIPPED_ALREADY_VERIFIED`, `SKIPPED_ALREADY_APPLIED`) without redundant execution.
+- **Structured Result Schema (`ResultSchema`)**: Standardized machine-readable outputs including test metrics (total, pass, fail, skip), changed files, security leak checks, and multi-revision history folding.
+- **Safe Credential Introspection (`dsh_credential_status`)**: Introspects API key / token availability and source without exposing raw secrets.
+- **New MCP Control Tools**: Registered `dsh_create_goal`, `dsh_revise_goal`, `dsh_pause_goal`, `dsh_resume_goal`, `dsh_retry_step`, `dsh_rerun_step`, `dsh_wait_until_action_required`, and `dsh_credential_status` (23 total MCP tools).
+- **Optimistic Locking**: Enforces `expected_revision` on `dsh_revise_goal` / `dsh_update_goal` to prevent lost updates.
+
+### Fixed
+
+- **Mutable workspace lock is enforced**: a second write Goal on the same workspace is rejected with `WORKSPACE_LOCKED` / `waiting_for_workspace_lock` unless `workspace_lock_override=true`. Read-only Goals may still run in parallel. Locks release on terminal status and `dsh_stop_goal`.
+- **Execution idempotency is on the live approval path**: repeated test/build/publish/push with the same fingerprint is skipped (`SKIPPED_ALREADY_VERIFIED` / `SKIPPED_ALREADY_APPLIED`) instead of re-executing. Approval-time mutation provenance and observed-success evidence use independent de-duplication, so real approved publish/push results are still cached. `dsh_rerun_step` resolves a graph step id/content to the matching execution kind before invalidation and cannot immediately re-import the old result.
+- **Dirty-worktree drift is fail-closed**: unchanged HEAD no longer hides staged, tracked, or untracked workspace changes. Successful mutations from the current Goal refresh its accepted baseline before the next operation; unrelated drift is rejected before cached no-op or approval evaluation.
+- **Approval deadlock fail-closed**: if the platform/Web mux blocks `approve`, `APPROVAL_UNREACHABLE` keeps the pending grant and reports that `reject` / `dsh_stop_goal` remain reachable. Reject and stop still settle locally when mux respond is refused.
+- **Capability surface**: MCP `constraints` now accepts `git.read`, `process.spawn`, `temp.*`, `external_path.*`, and related classes. Unrecognized commands default to human confirmation instead of auto-approve. `approvalPolicy` is part of plugin config.
+- **Mutation provenance**: mutating tool successes and grants record `session_id` / `goal_id` so workspace drift can name the originating session.
+- **Goal revision folding**: status, wait, and result surfaces expose one `Goal rev N` card with compact `revision_history` (no per-revision goal/plan text). Injected Agent turns state this is the same Goal, not a new session or agent.
+- **Structured results parse real evidence**: commit SHAs, git tags, pack/tarball artifacts (path/name/hash/size), and an actual `secret_leak_check` over tool output. Placeholders like `local-commit` / `tag-created` are only used when SHA/tag text is missing.
+- **Credential-safe introspection**: `dsh_credential_status` reports named env refs, keys present in `$DSH_HOME/credentials.yaml`, and runtime API-key configured state. Values, prefixes, and lengths are never returned.
+
+
+Targeted security and host/runtime consistency hardening for DeepSeek Harness
+`0.1.1-rc.2`, preserving the 15-tool MCP data-plane contract.
+
+### Fixed
+
+- **Canonical auth-token creation**: concurrent first-start processes now use
+  exclusive creation, losers adopt the stable persisted winner, token files use
+  POSIX `0600`, and malformed or unpersistable token state fails closed without
+  exposing token material.
+- **Unauthenticated listener boundary**: `authMode: none` is rejected for every
+  non-loopback HTTP listener at both config resolution and HTTP startup.
+- **RuntimeManager listener probe**: the manager now derives its MCP probe URL
+  from the configured listener host, brackets IPv6 correctly, and maps `0.0.0.0`
+  / `::` listeners to concrete local connect targets.
+- **Node 22 test runner**: selects the supported experimental isolation flag
+  before launch instead of producing a deliberate bad-option fallback.
+
+### Changed
+
+- Upgraded the complete direct `@deepseek-ai/dsh-*` runtime and development
+  family to `0.1.1-rc.2`; host-owned Cordis and `dsh-llm` remain peer + dev
+  dependencies while plugin-owned implementations remain ordinary dependencies.
+- Tightened the client manifest regression gate to the three verified rc.2
+  client graph modules; `dsh-client-ui-slots` remains excluded as a pure library.
+- Ignored release `*.tgz` artifacts without removing existing local tarballs.
+
 ## 0.4.1 — 2026-08-21
 
 DSH 0.1.1-rc.1 compatibility release. Upgrades the `@deepseek-ai/dsh-*` dependency

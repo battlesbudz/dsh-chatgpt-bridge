@@ -49,6 +49,12 @@ test('Test 1 — revision 1 is preserved when updating to revision 2', () => {
   assert.equal(view.revision, 2);
   assert.equal(view.previous_revision, 1);
   assert.equal(view.mode, 'standard');
+  assert.equal(view.card, 'Goal rev 2');
+  assert.equal(view.revision_history_folded, true);
+  assert.equal(view.revision_history.length, 2);
+  assert.equal(view.revision_history[0].revision, 1);
+  assert.equal(view.revision_history[1].revision, 2);
+  assert.ok(!JSON.stringify(view.revision_history).includes('publish v0.3.0'));
 });
 
 test('Test 2/9 — resume same goal_id, revision +1, deferred step cleared', () => {

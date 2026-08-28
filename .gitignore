@@ -2,6 +2,7 @@ node_modules/
 tools/
 .npm-cache/
 *.log
+*.tgz
 .DS_Store
 
 .preview-settings.html
@@ -12,6 +13,9 @@ tools/
 /.test-tmp/
 /.npm-cache-local/
 /.repair-*/
+/.auth-token-*/
+/.listener-host-*/
+/scratch/
 *.docx
 
 # local screenshot review/export artifacts (published copies live in assets/)

@@ -596,6 +596,7 @@ test('Bridge + WebGateway: full approval and question lifecycle over apiProxy', 
   await new Promise((r) => setTimeout(r, 20));
   await assert.rejects(
     () => bridge.approve('sess-b-4', 'appr-b-reject', 'approve'),
-    (err) => err instanceof BridgeError && err.code === 'APPROVAL_NOT_FOUND' && err.message.includes('expired'),
+    (err) => err instanceof BridgeError && err.code === 'APPROVAL_UNREACHABLE' && err.message.includes('expired'),
   );
+  assert.equal(bridge['approvals'].has('appr-b-reject'), true);
 });

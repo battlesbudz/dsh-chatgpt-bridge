@@ -10,11 +10,8 @@
  *   - Node 22:  `--experimental-test-isolation=none` (experimental name)
  *   - Node 23+: `--test-isolation=none` (stable name; the experimental name
  *     is kept as an alias)
- * Instead of hard-coding a version boundary, probe the stable name first:
- * Node exits with status 9 for a "bad option" (V8 bad-option exit code), so a
- * 9 means the flag is unknown on this Node and we retry with the
- * experimental name. A genuine test failure exits with the test runner's
- * non-zero status (1), which is propagated unchanged.
+ * Select the supported spelling before starting the suite so Node 22 does not
+ * emit a deliberate "bad option" failure before the real test run.
  */
 import { spawnSync } from 'node:child_process';
 
@@ -24,8 +21,6 @@ function run(flag) {
   return spawnSync(process.execPath, [flag, ...TEST_ARGS], { stdio: 'inherit' });
 }
 
-let result = run('--test-isolation=none');
-if (result.status === 9) {
-  result = run('--experimental-test-isolation=none');
-}
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+const result = run(nodeMajor === 22 ? '--experimental-test-isolation=none' : '--test-isolation=none');
 process.exit(result.status === null ? 1 : result.status);

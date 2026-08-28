@@ -174,6 +174,7 @@ test('discover: parseTunnelCommandLine extracts profile and proxy flag', () => {
   assert.equal(parsed.profileName, 'dsh-chatgpt-bridge');
   assert.equal(parsed.proxyFlag, true);
   assert.equal(healthBaseFromListenAddr('127.0.0.1:8080'), 'http://127.0.0.1:8080');
+  assert.equal(healthBaseFromListenAddr('http://[::1]:8080'), 'http://[::1]:8080');
   assert.equal(healthBaseFromListenAddr('127.0.0.1:0'), undefined);
   assert.equal(healthBaseFromListenAddr('0.0.0.0:8080'), undefined);
 });

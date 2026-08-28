@@ -12,6 +12,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { get as httpGet } from 'node:http';
 import { get as httpsGet } from 'node:https';
 
+import { normalizeSocketHostname } from '../config.js';
 import {
   createProcessIdentity,
   isProcessAlive,
@@ -500,7 +501,7 @@ function httpGetStatus(url: string, timeoutMs: number): Promise<number | undefin
     const u = new URL(url);
     const getFn = u.protocol === 'https:' ? httpsGet : httpGet;
     const req = getFn(
-      { host: u.hostname, port: u.port === '' ? undefined : Number(u.port), path: u.pathname, timeout: timeoutMs },
+      { host: normalizeSocketHostname(u.hostname), port: u.port === '' ? undefined : Number(u.port), path: u.pathname, timeout: timeoutMs },
       (res) => {
         res.resume();
         resolve(res.statusCode);

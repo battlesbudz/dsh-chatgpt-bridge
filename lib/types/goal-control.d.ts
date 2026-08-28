@@ -4,7 +4,7 @@ export declare const HISTORY_PERSIST_MAX = 200;
 export declare const HISTORY_WIRE_MAX = 20;
 export declare const REVISION_REASON_MAX = 200;
 export declare const GOAL_CONTROL_CAP = 256;
-export type GoalHistoryType = 'goal_created' | 'goal_revised' | 'goal_resumed' | 'step_started' | 'step_completed' | 'step_blocked' | 'step_deferred' | 'approval_requested' | 'approval_resolved' | 'question_requested' | 'question_answered' | 'constraint_rejected' | 'goal_completed' | 'goal_cancelled';
+export type GoalHistoryType = 'goal_created' | 'goal_revised' | 'goal_resumed' | 'step_started' | 'step_completed' | 'step_blocked' | 'step_deferred' | 'approval_requested' | 'approval_resolved' | 'question_requested' | 'question_answered' | 'constraint_rejected' | 'step_skipped' | 'goal_completed' | 'goal_cancelled';
 export interface GoalRevisionSnapshot {
     revision: number;
     previous_revision?: number;
@@ -24,6 +24,12 @@ export interface GoalHistoryEvent {
     step_id?: string;
     metadata?: Record<string, unknown>;
 }
+export interface BlockedStepRecord {
+    step_id: string;
+    reason: string;
+    seq: number;
+    superseded?: boolean;
+}
 export interface GoalRecord {
     goal_id: string;
     session_id: string;
@@ -38,14 +44,27 @@ export interface GoalRecord {
     revisions: GoalRevisionSnapshot[];
     deferred_step_ids: string[];
     completed_action_kinds: ActionKind[];
+    active_blockers?: BlockedStepRecord[];
+    superseded_step_ids?: string[];
     history: GoalHistoryEvent[];
     history_seq: number;
+}
+/** Compact revision row for folded UI / wire payloads. No goal/plan text. */
+export interface FoldedRevision {
+    revision: number;
+    previous_revision?: number;
+    revision_reason: string;
+    created_at: string;
 }
 export interface GoalSupervisionView {
     goal_id: string;
     revision: number;
     mode: ExecutionMode;
+    card: string;
+    revision_history_folded: boolean;
+    revision_history: FoldedRevision[];
     previous_revision?: number;
+    revisions?: GoalRevisionSnapshot[];
 }
 export interface CreateGoalInput {
     sessionId: string;
@@ -61,12 +80,15 @@ export interface ReviseGoalInput {
     plan?: string;
     mode?: ExecutionMode;
     constraints?: GoalConstraints;
+    expectedRevision?: number;
     deferredStepIds?: string[];
     resumeStepIds?: string[];
     completedActionKinds?: ActionKind[];
     revisionReason?: string;
     now?: number;
 }
+export declare function isGoalSemanticallyEqual(record: GoalRecord, goal: string, plan?: string, mode?: ExecutionMode, constraints?: GoalConstraints): boolean;
+export declare function pruneBlockers(record: GoalRecord, completedKinds: Iterable<ActionKind>): void;
 export interface GoalStoreIo {
     read(sessionId: string): string | undefined;
     write(sessionId: string, json: string): void;
@@ -109,3 +131,7 @@ export declare class GoalControlStore {
 }
 export declare function goalControlDir(dshHome: string): string;
 export declare function revisionBanner(record: GoalRecord): string;
+export declare function goalCardLabel(record: {
+    revision: number;
+}): string;
+export declare function foldRevisionHistory(record: GoalRecord): FoldedRevision[];

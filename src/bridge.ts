@@ -64,6 +64,7 @@ import {
   foldGoalFacts,
   successfulKinds,
   type ActionKind,
+  type LooseEvent,
 } from './goal-facts.js';
 import { reconcileTodos } from './goal-reconcile.js';
 import {
@@ -87,6 +88,8 @@ import {
   goalControlDir,
   sliceHistory,
   supervisionGoal,
+  isGoalSemanticallyEqual,
+  pruneBlockers,
   type GoalHistoryEvent,
   type GoalRecord,
   type GoalSupervisionView,
@@ -96,9 +99,16 @@ import {
   findPostHocViolation,
   parseConstraints,
   parseExecutionMode,
+  classesForTool,
   type ExecutionMode,
   type GoalConstraints,
 } from './goal-constraints.js';
+import { validateGoalPreflight } from './goal-preflight.js';
+import { evaluateApproval, DEFAULT_APPROVAL_POLICY, type UserApprovalPolicy } from './approval-policy.js';
+import { WorkspaceConcurrencyGuard, type WorkspaceBaseline } from './workspace-guard.js';
+import { ExecutionIdempotencyManager, idempotencyKindFor, isVerifiedKind } from './execution-idempotency.js';
+import { buildResultSchema, inspectCredentials, type ResultSchema, type CredentialStatus } from './result-schema.js';
+import { SecretStore } from './control/secret-store.js';
 import {
   asApiProxy,
   cancelQuestion,
@@ -116,10 +126,12 @@ export { normalizePath } from './paths.js';
 /** Typed bridge error with a stable machine-readable code. */
 export class BridgeError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) {
+  readonly details?: Record<string, unknown>;
+  constructor(code: string, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'BridgeError';
     this.code = code;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -130,9 +142,29 @@ export interface PendingApproval {
   toolName: string;
   callId?: string;
   reason?: string;
+  command?: string;
+  capability?: string;
+  level?: string;
   resolve: (outcome: ApprovalOutcome) => void;
   /** Set when the Web api-proxy parked this ask; settle via respond(). */
   muxRpcId?: string;
+}
+
+/** Who blocked or decided an approval, for deadlock diagnostics. */
+export type ApprovalLayer = 'user' | 'bridge_policy' | 'dsh_policy' | 'platform';
+
+export interface ApprovalRequestLike {
+  agent: {
+    id: string;
+    session?: {
+      events?: readonly { type: string; data?: unknown }[];
+      header?: { cwd?: string };
+    };
+  };
+  toolName: string;
+  callId?: string;
+  reason?: string;
+  signal?: AbortSignal;
 }
 
 /** One parked user question waiting on a ChatGPT answer. */
@@ -234,6 +266,7 @@ export interface ResultView {
   changed_files: string[];
   tool_calls: ToolCallInfo[];
   error?: { code: string; message: string };
+  result_schema?: ResultSchema;
 }
 
 /** One loaded session view: the live agent when attached, else persisted events. */
@@ -283,6 +316,17 @@ export class Bridge {
   private apiProxy: ApiProxyLike | undefined;
   private muxAbort: AbortController | undefined;
   private webOwnsApprovals = false;
+
+  readonly workspaceGuard = new WorkspaceConcurrencyGuard();
+  readonly idempotencyManager = new ExecutionIdempotencyManager();
+  private readonly workspaceBaselines = new Map<string, WorkspaceBaseline>();
+  private readonly recordedMutationCalls = new Set<string>();
+  private readonly recordedExecutionEvidenceCalls = new Set<string>();
+  private readonly observedSuccessfulMutationCalls = new Set<string>();
+  private readonly pendingBaselineRefresh = new Set<string>();
+  private readonly pendingExecutionFingerprints = new Map<string, { kind: string; fingerprint: string }>();
+  approvalPolicy: UserApprovalPolicy = DEFAULT_APPROVAL_POLICY;
+
   /** Test hooks for bounded wait loops. */
   now: () => number = () => Date.now();
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -291,6 +335,9 @@ export class Bridge {
     this.ctx = ctx;
     this.cfg = cfg;
     this.log = log;
+    if (cfg.approvalPolicy) {
+      this.approvalPolicy = { ...DEFAULT_APPROVAL_POLICY, ...cfg.approvalPolicy };
+    }
     const home = typeof cfg.dshHome === 'string' && cfg.dshHome !== '' ? cfg.dshHome : undefined;
     this.goalStore = new GoalControlStore(
       home === undefined ? undefined : fileStoreIo(goalControlDir(home)),
@@ -388,39 +435,7 @@ export class Bridge {
       }
     }
 
-    this.ctx.on('approval/request', (request, next) => {
-      if (!this.managed.has(request.agent.id)) return next();
-      if (this.rejectConstraint(request)) return Promise.resolve('rejected' as ApprovalOutcome);
-      if (this.webOwnsApprovals) return next();
-      const id = `approval-${randomUUID()}`;
-      const pending: PendingApproval = {
-        id,
-        sessionId: request.agent.id,
-        toolName: request.toolName,
-        callId: request.callId,
-        reason: request.reason,
-        resolve: () => {},
-      };
-      const decision = new Promise<ApprovalOutcome>((resolve) => {
-        pending.resolve = resolve;
-      });
-      this.approvals.set(id, pending);
-      this.noteGoalEvent(request.agent.id, 'approval_requested', {
-        metadata: { tool: request.toolName, approval_id: id },
-      });
-      this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName})`);
-      request.signal?.addEventListener(
-        'abort',
-        () => {
-          if (this.approvals.delete(id)) {
-            this.log.info(`approval ${id} withdrawn (turn aborted)`);
-            pending.resolve('cancelled');
-          }
-        },
-        { once: true },
-      );
-      return decision;
-    });
+    this.ctx.on('approval/request', (request, next) => this.decideApproval(request as ApprovalRequestLike, next));
 
     this.ctx.effect(() => () => {
       this.muxAbort?.abort();
@@ -895,6 +910,7 @@ export class Bridge {
     const error = span.reason !== undefined && span.reason.kind === 'error'
       ? { code: span.reason.error.code, message: span.reason.error.message }
       : undefined;
+    const resultSchema = await this.getStructuredResult(sessionId).catch(() => undefined);
     return {
       session_id: sessionId,
       status,
@@ -907,6 +923,7 @@ export class Bridge {
         arguments: truncate(call.arguments, 500),
       })),
       ...(error === undefined ? {} : { error }),
+      ...(resultSchema === undefined ? {} : { result_schema: resultSchema }),
     };
   }
 
@@ -930,6 +947,7 @@ export class Bridge {
   }> {
     const view = await this.loadView(sessionId);
     const status = await this.statusOf(sessionId, view);
+    this.releaseWorkspaceIfTerminal(sessionId, status);
     const pending = view.agent !== undefined
       ? { nextTurn: view.agent.inbox.nextTurn.length, nextStep: view.agent.inbox.nextStep.length }
       : foldPendingMessages(view.events);
@@ -949,6 +967,198 @@ export class Bridge {
 
   // ── Goal Supervision ──────────────────────────────────────────────────────
 
+  async createGoal(input: {
+    workspace: string;
+    goal: string;
+    plan?: string;
+    execution_mode?: ExecutionMode;
+    constraints?: GoalConstraints;
+    request_id?: string;
+    workspace_lock_override?: boolean;
+  }): Promise<GoalStartResult> {
+    return this.startGoal(input);
+  }
+
+  async reviseGoal(input: {
+    session_id: string;
+    goal?: string;
+    plan?: string;
+    execution_mode?: ExecutionMode;
+    constraints?: GoalConstraints;
+    expected_revision?: number;
+    revision_reason?: string;
+    request_id?: string;
+    workspace_lock_override?: boolean;
+  }): Promise<GoalStartResult> {
+    return this.updateGoal({
+      ...input,
+      action: 'revise',
+    });
+  }
+
+  async pauseGoal(sessionId: string): Promise<{
+    session_id: string;
+    status: BridgeStatus;
+    paused: boolean;
+    checkpoint_revision: number;
+  }> {
+    this.adopt(sessionId);
+    const agent = this.ctx.agents.get(SessionId(sessionId));
+    if (agent !== undefined && agent.status === 'running') {
+      agent.cancel({ kind: 'user' });
+    }
+    const record = this.goalStore.get(sessionId);
+    const view = await this.loadView(sessionId);
+    const status = await this.statusOf(sessionId, view);
+    return {
+      session_id: sessionId,
+      status,
+      paused: true,
+      checkpoint_revision: record?.revision ?? 1,
+    };
+  }
+
+  async resumeGoal(
+    sessionId: string,
+    resumeSteps?: string[],
+    requestId?: string,
+    workspaceLockOverride?: boolean,
+  ): Promise<GoalStartResult> {
+    return this.updateGoal({
+      session_id: sessionId,
+      action: 'resume',
+      resume_steps: resumeSteps,
+      request_id: requestId,
+      workspace_lock_override: workspaceLockOverride,
+    });
+  }
+
+  async retryStep(
+    sessionId: string,
+    stepId: string,
+    requestId?: string,
+    workspaceLockOverride?: boolean,
+  ): Promise<GoalStartResult> {
+    this.adopt(sessionId);
+    const record = this.goalStore.get(sessionId);
+    if (record !== undefined && record.active_blockers) {
+      record.active_blockers = record.active_blockers.filter((b) => b.step_id !== stepId);
+      this.goalStore.put(record);
+    }
+    return this.updateGoal({
+      session_id: sessionId,
+      action: 'resume',
+      resume_steps: [stepId],
+      revision_reason: `retry_step_${stepId}`,
+      request_id: requestId,
+      workspace_lock_override: workspaceLockOverride,
+    });
+  }
+
+  async rerunStep(
+    sessionId: string,
+    stepId: string,
+    requestId?: string,
+    workspaceLockOverride?: boolean,
+  ): Promise<GoalStartResult> {
+    this.adopt(sessionId);
+    const view = await this.loadView(sessionId);
+    const observed = this.observeGoal(sessionId, view, await this.statusOf(sessionId, view));
+    const resolved = resolveStepRefs([stepId], observed.graph.steps);
+    const resolvedKinds = new Set(resolved.kinds);
+    const cacheKinds = uniqueStrings([
+      ...resolved.contents.map((content) => idempotencyKindFor('', content) ?? ''),
+      ...resolved.kinds.map((kind) => idempotencyKindFor(kind) ?? kind),
+      idempotencyKindFor('', stepId) ?? '',
+    ]);
+    const record = this.goalStore.get(sessionId);
+    if (record !== undefined) {
+      record.completed_action_kinds = record.completed_action_kinds.filter((kind) => !resolvedKinds.has(kind));
+      if (record.active_blockers) {
+        const resolvedIds = new Set([stepId, ...resolved.ids, ...resolved.kinds]);
+        record.active_blockers = record.active_blockers.filter((blocker) => !resolvedIds.has(blocker.step_id));
+      }
+      this.goalStore.put(record);
+    }
+    for (const kind of cacheKinds) this.idempotencyManager.invalidateKind(kind);
+    return this.updateGoal({
+      session_id: sessionId,
+      action: 'revise',
+      revision_reason: `rerun_step_${stepId}`,
+      request_id: requestId,
+      workspace_lock_override: workspaceLockOverride,
+    });
+  }
+
+  async waitUntilActionRequired(sessionId: string, waitSeconds = 120): Promise<GoalWaitResult> {
+    this.adopt(sessionId);
+    const seconds = Math.min(300, Math.max(1, waitSeconds));
+    const started = this.now();
+    const deadline = started + seconds * 1000;
+    let view = await this.loadView(sessionId);
+    let status = await this.statusOf(sessionId, view);
+
+    while (isActiveStatus(status) && this.now() < deadline) {
+      const remaining = deadline - this.now();
+      if (remaining <= 0) break;
+      await this.sleep(Math.min(WAIT_POLL_MS, remaining));
+      view = await this.loadView(sessionId);
+      status = await this.statusOf(sessionId, view);
+      if (!isActiveStatus(status)) break;
+    }
+    return this.goalSnapshot(sessionId, view, status, this.now() - started, seconds);
+  }
+
+  async getStructuredResult(sessionId: string): Promise<ResultSchema> {
+    this.adopt(sessionId);
+    const view = await this.loadView(sessionId);
+    const status = await this.statusOf(sessionId, view);
+    const record = this.goalStore.get(sessionId);
+    const workspace = view.header?.cwd ?? '';
+    const warnings: string[] = [];
+    if (record?.history) {
+      for (const event of record.history) {
+        if (event.metadata?.reason === 'WORKSPACE_DRIFT') {
+          const details = typeof event.metadata.details === 'string'
+            ? event.metadata.details
+            : 'Workspace drift detected';
+          warnings.push(details);
+        }
+      }
+    }
+    const lastMutation = workspace === '' ? undefined : this.workspaceGuard.getLastMutation(workspace);
+    return buildResultSchema({
+      sessionId,
+      record,
+      events: view.events,
+      status,
+      workspace,
+      evidenceIds: this.idempotencyManager.listEvidence().map((item) => item.evidenceId),
+      credentialRefs: this.getCredentialStatus()
+        .filter((item) => item.credentialAvailable)
+        .map((item) => item.credentialRef),
+      originatingStep: lastMutation?.stepId ?? lastMutation?.type,
+      warnings,
+    });
+  }
+
+  getCredentialStatus(): CredentialStatus[] {
+    const home = this.cfg.dshHome;
+    let runtimeKeyConfigured = false;
+    if (typeof home === 'string' && home !== '') {
+      try {
+        runtimeKeyConfigured = new SecretStore(home).runtimeApiKeyConfigured();
+      } catch {
+        runtimeKeyConfigured = false;
+      }
+    }
+    return inspectCredentials({
+      env: process.env,
+      ...(typeof home === 'string' && home !== '' ? { dshHome: home } : {}),
+      runtimeKeyConfigured,
+    });
+  }
+
   async startGoal(input: {
     workspace: string;
     goal: string;
@@ -957,8 +1167,25 @@ export class Bridge {
     request_id?: string;
     execution_mode?: ExecutionMode;
     constraints?: GoalConstraints;
+    expected_revision?: number;
+    workspace_lock_override?: boolean;
   }): Promise<GoalStartResult> {
     if (input.goal.trim() === '') throw new BridgeError('EMPTY_GOAL', 'goal must not be empty');
+
+    // 1. Static Preflight Validation
+    const preflight = validateGoalPreflight({
+      goal: input.goal,
+      plan: input.plan,
+      constraints: input.constraints,
+      mode: input.execution_mode,
+    });
+    if (!preflight.valid) {
+      throw new BridgeError(
+        'GOAL_INVALID',
+        `Goal contradicts constraints: ${preflight.conflicts.join('; ')}`,
+      );
+    }
+
     const fingerprint = fingerprintStart(input);
     if (input.request_id !== undefined && input.request_id !== '') {
       const existing = this.goalRequests.get(input.request_id);
@@ -971,17 +1198,71 @@ export class Bridge {
         }
         this.adopt(existing.sessionId);
         const view = await this.loadView(existing.sessionId);
-        return this.mapGoalStart(existing.sessionId, view);
+        return {
+          ...(await this.mapGoalStart(existing.sessionId, view)),
+          existing_goal_reused: true,
+          revision_unchanged: true,
+        };
       }
     }
+
     let sessionId = input.session_id;
+    const resolvedWorkspace = await this.resolveWorkspace(input.workspace);
+    const workspacePath = resolvedWorkspace.path;
+    const isReadOnly = input.constraints?.read_only === true;
+    const lockOverride = input.workspace_lock_override === true;
+
     if (sessionId === undefined || sessionId === '') {
+      // Check if there is an active session on this workspace with identical Goal
+      const activeSessions = this.ctx.agents.list();
+      let reusedSessionId: string | undefined;
+      for (const agent of activeSessions) {
+        const record = this.goalStore.get(agent.id);
+        if (record !== undefined && pathsEqual(agent.session.header?.cwd ?? '', workspacePath)) {
+          if (isGoalSemanticallyEqual(record, input.goal, input.plan, input.execution_mode, input.constraints)) {
+            reusedSessionId = agent.id;
+            break;
+          }
+        }
+      }
+
+      if (reusedSessionId !== undefined) {
+        sessionId = reusedSessionId;
+        this.adopt(sessionId);
+        const view = await this.loadView(sessionId);
+        return {
+          ...(await this.mapGoalStart(sessionId, view)),
+          existing_goal_reused: true,
+          revision_unchanged: true,
+        };
+      }
+
+      this.assertMutableWorkspaceAvailable(workspacePath, undefined, lockOverride, isReadOnly);
       const created = await this.createSession(input.workspace, titleFromGoal(input.goal));
       sessionId = created.session_id;
     } else {
-      await this.resolveWorkspace(input.workspace);
       this.adopt(sessionId);
     }
+
+    await this.takeWorkspaceLock(workspacePath, sessionId, lockOverride, isReadOnly);
+
+    // 3. Goal Deduplication on existing session
+    const existingRecord = this.goalStore.get(sessionId);
+    if (
+      existingRecord !== undefined &&
+      isGoalSemanticallyEqual(existingRecord, input.goal, input.plan, input.execution_mode, input.constraints)
+    ) {
+      if (input.request_id !== undefined && input.request_id !== '') {
+        this.goalRequests.set(input.request_id, { sessionId, fingerprint });
+      }
+      const view = await this.loadView(sessionId);
+      return {
+        ...(await this.mapGoalStart(sessionId, view)),
+        existing_goal_reused: true,
+        revision_unchanged: true,
+      };
+    }
+
     const record = this.applyStartOrRevise(sessionId, input);
     await this.sendMessage(sessionId, this.controlMessage(record, input.goal, input.plan, record.revision === 1 ? 'start' : 'revise'));
     if (input.request_id !== undefined && input.request_id !== '') {
@@ -998,11 +1279,13 @@ export class Bridge {
     plan?: string;
     execution_mode?: ExecutionMode;
     constraints?: GoalConstraints;
+    expected_revision?: number;
     defer_steps?: string[];
     resume_steps?: string[];
     revision_reason?: string;
     request_id?: string;
     workspace?: string;
+    workspace_lock_override?: boolean;
   }): Promise<GoalStartResult> {
     const sessionId = input.session_id;
     if (sessionId.trim() === '') throw new BridgeError('SESSION_REQUIRED', 'dsh_update_goal requires session_id');
@@ -1027,7 +1310,11 @@ export class Bridge {
         }
         this.adopt(existing.sessionId);
         const view = await this.loadView(existing.sessionId);
-        return this.mapGoalStart(existing.sessionId, view);
+        return {
+          ...(await this.mapGoalStart(existing.sessionId, view)),
+          existing_goal_reused: true,
+          revision_unchanged: true,
+        };
       }
     }
     this.adopt(sessionId);
@@ -1036,7 +1323,22 @@ export class Bridge {
     if (action === 'resume' && current === undefined) {
       throw new BridgeError('GOAL_NOT_FOUND', `no supervised goal on session ${sessionId}; resume will not create one`);
     }
+
+    if (input.expected_revision !== undefined && current !== undefined && input.expected_revision !== current.revision) {
+      throw new BridgeError(
+        'REVISION_CONFLICT',
+        `expected_revision mismatch: expected ${input.expected_revision}, but current revision is ${current.revision}`,
+      );
+    }
+
     const viewBefore = await this.loadView(sessionId);
+    const workspacePath = viewBefore.header?.cwd ?? '';
+    const isReadOnly = (input.constraints?.read_only ?? current?.constraints?.read_only) === true;
+    const lockOverride = input.workspace_lock_override === true;
+    if (workspacePath !== '') {
+      this.assertMutableWorkspaceAvailable(workspacePath, sessionId, lockOverride, isReadOnly);
+      await this.takeWorkspaceLock(workspacePath, sessionId, lockOverride, isReadOnly);
+    }
     const observed = this.observeGoal(sessionId, viewBefore, await this.statusOf(sessionId, viewBefore));
     const resolvedDefer = input.defer_steps === undefined
       ? { ids: [] as string[], kinds: [] as ActionKind[] }
@@ -1066,6 +1368,7 @@ export class Bridge {
       ...(input.plan === undefined ? {} : { plan: input.plan }),
       ...(input.execution_mode === undefined ? {} : { mode: parseExecutionMode(input.execution_mode) }),
       ...(input.constraints === undefined ? {} : { constraints: parseConstraints(input.constraints) }),
+      ...(input.expected_revision === undefined ? {} : { expectedRevision: input.expected_revision }),
       ...(deferIds.length === 0 ? {} : { deferredStepIds: deferIds }),
       ...(action === 'resume' ? { resumeStepIds: resumeIds } : {}),
       completedActionKinds: [...successfulKinds(observed.facts)],
@@ -1074,6 +1377,7 @@ export class Bridge {
       ),
       now: this.now(),
     }, action === 'resume' ? 'goal_resumed' : 'goal_revised');
+    pruneBlockers(record, successfulKinds(observed.facts));
     this.goalStore.put(record);
     const intent = action === 'resume' ? 'resume' : action === 'defer' ? 'defer' : 'revise';
     await this.sendMessage(sessionId, this.controlMessage(
@@ -1115,6 +1419,7 @@ export class Bridge {
     cleanup_warning?: string;
   }> {
     this.adopt(sessionId);
+    this.workspaceGuard.releaseLock(sessionId);
     const view = await this.loadView(sessionId);
     const status = await this.statusOf(sessionId, view);
     if (isTerminalStatus(status) || status === 'unknown' || (status === 'idle' && view.agent === undefined)) {
@@ -1155,20 +1460,29 @@ export class Bridge {
     for (const pending of [...this.approvals.values()]) {
       if (pending.sessionId !== sessionId) continue;
       this.approvals.delete(pending.id);
+      let settled = false;
       if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
-        await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, pending.id, 'rejected');
-      } else {
-        pending.resolve('cancelled');
+        try {
+          const receipt = await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, pending.id, 'rejected');
+          settled = receipt.accepted;
+        } catch {
+          settled = false;
+        }
       }
+      if (!settled) pending.resolve('cancelled');
+      else pending.resolve('rejected');
     }
     for (const pending of [...this.questions.values()]) {
       if (pending.sessionId !== sessionId) continue;
       this.questions.delete(pending.id);
       if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
-        await cancelQuestion(this.apiProxy, pending.muxRpcId);
-      } else {
-        pending.resolve({ answers: [] });
+        try {
+          await cancelQuestion(this.apiProxy, pending.muxRpcId);
+        } catch {
+          // local fail-closed below
+        }
       }
+      pending.resolve({ answers: [] });
     }
   }
 
@@ -1218,6 +1532,7 @@ export class Bridge {
 
   private async mapGoalStart(sessionId: string, view: LoadedView): Promise<GoalStartResult> {
     const status = await this.statusOf(sessionId, view);
+    this.releaseWorkspaceIfTerminal(sessionId, status);
     const observed = this.observeGoal(sessionId, view, status);
     const record = applyNativeGetGoalResult(this.goalStore.get(sessionId), undefined);
     const currentStep = observed.blocked?.step
@@ -1240,8 +1555,136 @@ export class Bridge {
     this.goalStore.put(appendGoalEvent(record, type, { ...extra, now: this.now() }));
   }
 
+  /**
+   * Decide a DSH approval/request for a managed session.
+   * Idempotent high-cost steps are skipped; L0/L1 may auto-approve;
+   * deny/reject always remain reachable even if approve is blocked.
+   */
+  async decideApproval(
+    request: ApprovalRequestLike,
+    next: () => Promise<ApprovalOutcome> | ApprovalOutcome = () => Promise.resolve('rejected' as ApprovalOutcome),
+  ): Promise<ApprovalOutcome> {
+    if (!this.managed.has(request.agent.id)) return next();
+
+    const command = commandForCall(request.agent.session?.events, request.callId);
+    const evalDecision = evaluateApproval(request.toolName, command, this.approvalPolicy);
+    const workspacePath = request.agent.session?.header?.cwd
+      ?? this.workspaceBaselines.get(request.agent.id)?.workspacePath;
+    if (workspacePath !== undefined && workspacePath !== '') {
+      this.recordObservedExecutionFacts(
+        request.agent.id,
+        workspacePath,
+        foldGoalFacts((request.agent.session?.events ?? []) as readonly LooseEvent[]),
+      );
+      await this.refreshWorkspaceBaselineIfNeeded(request.agent.id, workspacePath);
+    }
+    const baseline = this.workspaceBaselines.get(request.agent.id);
+    const mutatingOperation = isMutatingTool(request.toolName, command);
+    const needsCurrentSnapshot = mutatingOperation
+      || idempotencyKindFor(request.toolName, command) !== undefined;
+    const currentSnapshot = workspacePath !== undefined && workspacePath !== '' && needsCurrentSnapshot
+      ? await this.workspaceGuard.captureBaseline(workspacePath)
+      : undefined;
+
+    if (workspacePath && baseline && mutatingOperation) {
+      const drift = await this.workspaceGuard.detectDrift(
+        workspacePath,
+        baseline,
+        request.agent.id,
+        currentSnapshot,
+      );
+      if (drift.drifted) {
+        this.log.warn(`Workspace drift detected on ${request.agent.id}: ${drift.details}`);
+        this.noteGoalEvent(request.agent.id, 'constraint_rejected', {
+          metadata: {
+            reason: 'WORKSPACE_DRIFT',
+            details: drift.details,
+            originating_session_id: drift.originatingSessionId,
+          },
+        });
+        return 'rejected' as ApprovalOutcome;
+      }
+    }
+
+    if (workspacePath !== undefined && workspacePath !== '') {
+      const skip = this.skipIdempotentStep(
+        request.agent.id,
+        request.toolName,
+        command,
+        workspacePath,
+        currentSnapshot ?? baseline,
+        request.callId,
+      );
+      if (skip !== undefined) return 'rejected' as ApprovalOutcome;
+    }
+
+    // A proven no-op replay is safe to fold before the normal constraint
+    // rejection path. New work still goes through constraints and approval.
+    if (this.rejectConstraint(request)) return 'rejected' as ApprovalOutcome;
+
+    if (evalDecision.decision === 'auto_approve') {
+      if (workspacePath && mutatingOperation) {
+        this.noteMutation(workspacePath, request.agent.id, request.toolName, command, request.callId);
+      }
+      this.log.info(`auto-approving L0/L1 tool ${request.toolName} (capability ${evalDecision.capability}) for session ${request.agent.id}`);
+      return 'approved' as ApprovalOutcome;
+    }
+    if (evalDecision.decision === 'deny') {
+      this.log.info(`policy denied tool ${request.toolName} (capability ${evalDecision.capability}) for session ${request.agent.id}: ${evalDecision.reason}`);
+      this.noteGoalEvent(request.agent.id, 'constraint_rejected', {
+        metadata: {
+          reason: evalDecision.reason,
+          tool: request.toolName,
+          layer: 'bridge_policy' satisfies ApprovalLayer,
+          capability: evalDecision.capability,
+        },
+      });
+      return 'rejected' as ApprovalOutcome;
+    }
+
+    if (this.webOwnsApprovals) return next();
+    const id = `approval-${randomUUID()}`;
+    const pending: PendingApproval = {
+      id,
+      sessionId: request.agent.id,
+      toolName: request.toolName,
+      callId: request.callId,
+      reason: request.reason,
+      command,
+      capability: evalDecision.capability,
+      level: evalDecision.level,
+      resolve: () => {},
+    };
+    const decision = new Promise<ApprovalOutcome>((resolve) => {
+      pending.resolve = resolve;
+    });
+    this.approvals.set(id, pending);
+    this.noteGoalEvent(request.agent.id, 'approval_requested', {
+      metadata: {
+        tool: request.toolName,
+        approval_id: id,
+        capability: evalDecision.capability,
+        level: evalDecision.level,
+        command,
+        layer: 'user' satisfies ApprovalLayer,
+      },
+    });
+    this.log.info(`approval ${id} pending for session ${request.agent.id} (tool ${request.toolName}, level ${evalDecision.level})`);
+    request.signal?.addEventListener(
+      'abort',
+      () => {
+        if (this.approvals.delete(id)) {
+          this.log.info(`approval ${id} withdrawn (turn aborted)`);
+          pending.resolve('cancelled');
+        }
+      },
+      { once: true },
+    );
+    return decision;
+  }
+
   private rejectConstraint(request: {
-    agent: { id: string; session?: { events: readonly { type: string; data?: unknown }[] } };
+    agent: { id: string; session?: { events?: readonly { type: string; data?: unknown }[] } };
     toolName: string;
     callId?: string;
   }): boolean {
@@ -1274,6 +1717,7 @@ export class Bridge {
 
   private observeGoal(sessionId: string, view: LoadedView, status: BridgeStatus) {
     const facts = foldGoalFacts(view.events);
+    this.recordObservedExecutions(sessionId, view, facts);
     let record = this.goalStore.get(sessionId);
     const succeeded = [...successfulKinds(facts)];
     if (record !== undefined && succeeded.some((kind) => !record!.completed_action_kinds.includes(kind))) {
@@ -1436,6 +1880,7 @@ export class Bridge {
         this.goalStore.put(appendGoalEvent(record, status === 'cancelled' ? 'goal_cancelled' : 'goal_completed', { now: this.now() }));
       }
     }
+    this.releaseWorkspaceIfTerminal(sessionId, status);
     if (!mapped.terminal) return mapped;
     const warning = this.cleanupGoalTemps(sessionId, view);
     return warning === undefined ? mapped : { ...mapped, cleanup_warning: warning };
@@ -1491,6 +1936,8 @@ export class Bridge {
     session_id: string;
     decision: 'approve' | 'reject';
     outcome: ApprovalOutcome;
+    layer: ApprovalLayer;
+    fail_closed?: boolean;
   }> {
     const pending = this.approvals.get(approvalId);
     if (pending === undefined) {
@@ -1499,19 +1946,276 @@ export class Bridge {
     if (pending.sessionId !== sessionId) {
       throw new BridgeError('APPROVAL_SESSION_MISMATCH', `approval ${approvalId} belongs to session ${pending.sessionId}`);
     }
-    this.approvals.delete(approvalId);
     const outcome: ApprovalOutcome = decision === 'approve' ? 'allowed-once' : 'rejected';
     if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
       const receipt = await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, approvalId, outcome);
       if (!receipt.accepted) {
-        throw new BridgeError('APPROVAL_NOT_FOUND', `Web gateway rejected decision for ${approvalId}: ${receipt.reason ?? 'not-pending'}`);
+        if (decision === 'approve') {
+          throw new BridgeError(
+            'APPROVAL_UNREACHABLE',
+            `approve is blocked by the platform security layer for ${approvalId}: ${receipt.reason ?? 'not-pending'}. reject or dsh_stop_goal remains reachable.`,
+            {
+              layer: 'platform' satisfies ApprovalLayer,
+              reject_reachable: true,
+              cancel_reachable: true,
+              approval_id: approvalId,
+            },
+          );
+        }
+        this.approvals.delete(approvalId);
+        pending.resolve('rejected');
+        this.noteGoalEvent(sessionId, 'approval_resolved', {
+          metadata: { approval_id: approvalId, decision: 'reject', layer: 'platform' satisfies ApprovalLayer, fail_closed: true },
+        });
+        this.log.info(`approval ${approvalId} fail-closed rejected after platform blocked mux respond`);
+        return {
+          approval_id: approvalId,
+          session_id: sessionId,
+          decision: 'reject',
+          outcome: 'rejected',
+          layer: 'platform',
+          fail_closed: true,
+        };
       }
     } else {
       pending.resolve(outcome);
     }
+    this.approvals.delete(approvalId);
+    if (decision === 'approve') {
+      const workspacePath = this.workspaceBaselines.get(sessionId)?.workspacePath;
+      if (workspacePath && isMutatingTool(pending.toolName, pending.command)) {
+        this.noteMutation(workspacePath, sessionId, pending.toolName, pending.command, pending.callId);
+      }
+    }
     this.log.info(`approval ${approvalId} decided: ${decision}`);
-    this.noteGoalEvent(sessionId, 'approval_resolved', { metadata: { approval_id: approvalId, decision } });
-    return { approval_id: approvalId, session_id: sessionId, decision, outcome };
+    this.noteGoalEvent(sessionId, 'approval_resolved', {
+      metadata: { approval_id: approvalId, decision, layer: 'user' satisfies ApprovalLayer },
+    });
+    return { approval_id: approvalId, session_id: sessionId, decision, outcome, layer: 'user' };
+  }
+
+  private isLockHolderActive(sessionId: string): boolean {
+    const holderAgent = this.ctx.agents.get(SessionId(sessionId));
+    if (holderAgent === undefined) return false;
+    if (holderAgent.status === 'running') return true;
+    return holderAgent.inbox.nextTurn.length > 0 || holderAgent.inbox.nextStep.length > 0;
+  }
+
+  private workspaceLockedError(holder: { sessionId: string; goalId: string }): BridgeError {
+    return new BridgeError(
+      'WORKSPACE_LOCKED',
+      `workspace is locked by session ${holder.sessionId} (goal ${holder.goalId}); waiting_for_workspace_lock. Pass workspace_lock_override=true to take over.`,
+      {
+        status: 'waiting_for_workspace_lock',
+        holder_session_id: holder.sessionId,
+        holder_goal_id: holder.goalId,
+      },
+    );
+  }
+
+  private assertMutableWorkspaceAvailable(
+    workspacePath: string,
+    sessionId: string | undefined,
+    override: boolean,
+    isReadOnly: boolean,
+  ): void {
+    if (isReadOnly || override) return;
+    const existing = this.workspaceGuard.getLock(workspacePath);
+    if (existing === undefined) return;
+    if (sessionId !== undefined && existing.sessionId === sessionId) return;
+    if (this.isLockHolderActive(existing.sessionId)) {
+      throw this.workspaceLockedError(existing);
+    }
+  }
+
+  private async takeWorkspaceLock(
+    workspacePath: string,
+    sessionId: string,
+    override: boolean,
+    isReadOnly: boolean,
+  ): Promise<void> {
+    if (isReadOnly) return;
+    const existing = this.workspaceGuard.getLock(workspacePath);
+    const holderActive = existing !== undefined && existing.sessionId !== sessionId
+      ? this.isLockHolderActive(existing.sessionId)
+      : false;
+    const lockRes = this.workspaceGuard.acquireMutableLock(
+      workspacePath,
+      sessionId,
+      `goal-${sessionId}`,
+      holderActive,
+      override,
+    );
+    if (!lockRes.success && lockRes.holder !== undefined) {
+      throw this.workspaceLockedError(lockRes.holder);
+    }
+    if (lockRes.warning) this.log.warn(lockRes.warning);
+    if (!this.workspaceBaselines.has(sessionId)) {
+      const baseline = await this.workspaceGuard.captureBaseline(workspacePath);
+      this.workspaceBaselines.set(sessionId, baseline);
+    }
+  }
+
+  private releaseWorkspaceIfTerminal(sessionId: string, status: BridgeStatus): void {
+    if (isTerminalStatus(status)) this.workspaceGuard.releaseLock(sessionId);
+  }
+
+  private skipIdempotentStep(
+    sessionId: string,
+    toolName: string,
+    command: string | undefined,
+    workspacePath: string,
+    snapshot?: WorkspaceBaseline,
+    callId?: string,
+  ): { code: string; evidenceId: string } | undefined {
+    const kind = idempotencyKindFor(toolName, command);
+    if (kind === undefined) return undefined;
+    const fingerprint = this.idempotencyManager.computeFingerprint({
+      kind,
+      command,
+      workspacePath,
+      headSha: snapshot?.headSha,
+      extra: this.executionFingerprintExtra(snapshot),
+    });
+    const hit = this.idempotencyManager.check(fingerprint);
+    if (hit === null) {
+      if (callId !== undefined) {
+        this.rememberPendingExecutionFingerprint(`${sessionId}:${callId}`, { kind, fingerprint });
+      }
+      return undefined;
+    }
+    this.noteGoalEvent(sessionId, 'step_skipped', {
+      step_id: kind,
+      metadata: {
+        code: hit.code,
+        evidence_id: hit.evidenceId,
+        command,
+        message: hit.message,
+      },
+    });
+    this.log.info(`skipping ${kind} on ${sessionId}: ${hit.code} (${hit.evidenceId})`);
+    return { code: hit.code, evidenceId: hit.evidenceId };
+  }
+
+  private recordObservedExecutions(
+    sessionId: string,
+    view: LoadedView,
+    facts: ReturnType<typeof foldGoalFacts>,
+  ): void {
+    const workspacePath = view.header?.cwd ?? this.workspaceBaselines.get(sessionId)?.workspacePath;
+    if (workspacePath === undefined || workspacePath === '') return;
+    this.recordObservedExecutionFacts(sessionId, workspacePath, facts);
+  }
+
+  private recordObservedExecutionFacts(
+    sessionId: string,
+    workspacePath: string,
+    facts: ReturnType<typeof foldGoalFacts>,
+  ): void {
+    const baseline = this.workspaceBaselines.get(sessionId);
+    const goalId = this.goalStore.get(sessionId)?.goal_id ?? `goal-${sessionId}`;
+    for (const tool of facts.tools) {
+      if (!tool.ok) continue;
+      const key = `${sessionId}:${tool.callId}`;
+      if (isMutatingTool(tool.name, tool.command) && !this.observedSuccessfulMutationCalls.has(key)) {
+        this.rememberObservedSuccessfulMutationCall(key);
+        this.pendingBaselineRefresh.add(sessionId);
+        if (!this.recordedMutationCalls.has(key)) {
+          this.rememberMutationCall(key);
+          this.workspaceGuard.recordMutation(workspacePath, {
+            sessionId,
+            goalId,
+            stepId: tool.callId,
+            type: idempotencyKindFor(tool.name, tool.command) ?? tool.name,
+            details: tool.command,
+          });
+        }
+      }
+      const kind = idempotencyKindFor(tool.name, tool.command);
+      if (kind === undefined) continue;
+      if (this.recordedExecutionEvidenceCalls.has(key)) continue;
+      this.rememberExecutionEvidenceCall(key);
+      const pending = this.pendingExecutionFingerprints.get(key);
+      this.pendingExecutionFingerprints.delete(key);
+      const fingerprint = pending?.kind === kind
+        ? pending.fingerprint
+        : this.idempotencyManager.computeFingerprint({
+            kind,
+            command: tool.command,
+            workspacePath,
+            headSha: baseline?.headSha,
+            extra: this.executionFingerprintExtra(baseline),
+          });
+      if (this.idempotencyManager.check(fingerprint) !== null) continue;
+      this.idempotencyManager.recordSuccess(fingerprint, {
+        kind,
+        status: isVerifiedKind(kind) ? 'passed' : 'applied',
+        summary: tool.resultText,
+      });
+    }
+  }
+
+  private executionFingerprintExtra(snapshot?: WorkspaceBaseline): Record<string, unknown> {
+    return {
+      workspace_fingerprint: snapshot?.workspaceFingerprint ?? '',
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+    };
+  }
+
+  private async refreshWorkspaceBaselineIfNeeded(sessionId: string, workspacePath: string): Promise<void> {
+    if (!this.pendingBaselineRefresh.delete(sessionId)) return;
+    this.workspaceBaselines.set(sessionId, await this.workspaceGuard.captureBaseline(workspacePath));
+  }
+
+  private noteMutation(
+    workspacePath: string,
+    sessionId: string,
+    toolName: string,
+    command: string | undefined,
+    callId?: string,
+  ): void {
+    const key = `${sessionId}:${callId ?? toolName}:${command ?? ''}`;
+    if (this.recordedMutationCalls.has(key)) return;
+    this.rememberMutationCall(key);
+    this.workspaceGuard.recordMutation(workspacePath, {
+      sessionId,
+      goalId: this.goalStore.get(sessionId)?.goal_id ?? `goal-${sessionId}`,
+      stepId: callId,
+      type: idempotencyKindFor(toolName, command) ?? toolName,
+      details: command,
+    });
+  }
+
+  private rememberMutationCall(key: string): void {
+    this.recordedMutationCalls.add(key);
+    while (this.recordedMutationCalls.size > 2048) {
+      const oldest = this.recordedMutationCalls.values().next().value;
+      if (oldest === undefined) break;
+      this.recordedMutationCalls.delete(oldest);
+    }
+  }
+
+  private rememberExecutionEvidenceCall(key: string): void {
+    rememberCappedSet(this.recordedExecutionEvidenceCalls, key);
+  }
+
+  private rememberObservedSuccessfulMutationCall(key: string): void {
+    rememberCappedSet(this.observedSuccessfulMutationCalls, key);
+  }
+
+  private rememberPendingExecutionFingerprint(
+    key: string,
+    value: { kind: string; fingerprint: string },
+  ): void {
+    if (this.pendingExecutionFingerprints.has(key)) this.pendingExecutionFingerprints.delete(key);
+    this.pendingExecutionFingerprints.set(key, value);
+    while (this.pendingExecutionFingerprints.size > 2048) {
+      const oldest = this.pendingExecutionFingerprints.keys().next().value;
+      if (oldest === undefined) break;
+      this.pendingExecutionFingerprints.delete(oldest);
+    }
   }
 
   // ── introspection used by the MCP layer ───────────────────────────────────
@@ -1523,4 +2227,23 @@ export class Bridge {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((item) => item.trim() !== ''))];
+}
+
+function rememberCappedSet(target: Set<string>, value: string, cap = 2048): void {
+  if (target.has(value)) target.delete(value);
+  target.add(value);
+  while (target.size > cap) {
+    const oldest = target.values().next().value;
+    if (oldest === undefined) break;
+    target.delete(oldest);
+  }
+}
+
+function isMutatingTool(toolName: string, command?: string): boolean {
+  const classes = classesForTool(toolName, command);
+  return classes.includes('filesystem.write')
+    || classes.includes('git.mutate')
+    || classes.includes('npm.publish')
+    || classes.includes('github.release')
+    || classes.includes('external_path.write');
 }
