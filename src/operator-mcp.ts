@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Bridge } from './bridge.js';
 import { CHATGPT_WORK_CAPABILITIES, englishOperatorInstruction } from './operator-contract.js';
+import { createOperatorReceipt } from './operator-receipt.js';
 
 function result(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
@@ -39,12 +40,37 @@ export function registerOperatorTools(server: McpServer, bridge: Bridge): void {
   }, async ({session_id,max_chars}:{session_id:string;max_chars?:number}) => {
     const finalResult = await bridge.getResult(session_id,max_chars);
     const status = await bridge.getTaskStatus(session_id);
-    return result({
-      schema_version:1,
-      language:'en-US',
+    const schema = finalResult.result_schema;
+    const toolOperations = finalResult.tool_calls.map((call) => ({ tool: call.name, outcome: call.status ?? 'observed' }));
+    const testSuites = schema?.tests.suites ?? [];
+    const tests = testSuites.map((name) => ({
+      name,
+      status: (schema?.tests.fail ?? 0) > 0 ? 'failed' : 'passed',
+      evidence: (schema?.tests.evidence_ids ?? []).join(', ') || undefined,
+    }));
+    const unresolved = [
+      ...(finalResult.error === undefined ? [] : [finalResult.error.message]),
+      ...(schema?.warnings ?? []),
+      ...((status.blocked_steps ?? []).map((step) => `Blocked step: ${step}`)),
+    ];
+    const receipt = createOperatorReceipt({
       session_id,
-      status,
-      dsh_result:finalResult,
+      goal_revision: status.goal?.revision,
+      status: finalResult.status,
+      summary: finalResult.summary,
+      changed_files: schema?.changes.changed_files ?? finalResult.changed_files,
+      commits: schema?.changes.commits ?? [],
+      tests,
+      builds: toolOperations
+        .filter((item) => /build/i.test(item.tool))
+        .map((item) => ({ name: item.tool, status: item.outcome })),
+      tool_operations: toolOperations,
+      unresolved,
+      review_ready: finalResult.status === 'completed' && unresolved.length === 0,
+    });
+    return result({
+      receipt,
+      evidence: { dsh_result: finalResult, task_status: status },
       review_instruction:'Independently inspect the changed files, commit evidence, build/test evidence, unresolved failures, and acceptance criteria. Do not treat the worker self-report as verification.',
       recommended_reviewers:['ChatGPT Work','PStack'],
     });
