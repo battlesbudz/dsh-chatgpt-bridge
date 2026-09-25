@@ -41,7 +41,7 @@ export function registerOperatorTools(server: McpServer, bridge: Bridge): void {
     const finalResult = await bridge.getResult(session_id,max_chars);
     const status = await bridge.getTaskStatus(session_id);
     const schema = finalResult.result_schema;
-    const toolOperations = finalResult.tool_calls.map((call) => ({ tool: call.name, outcome: call.status ?? 'observed' }));
+    const toolOperations = finalResult.tool_calls.map((call) => ({ tool: call.name, outcome: call.isError === true ? 'failed' : 'observed' }));
     const testSuites = schema?.tests.suites ?? [];
     const tests = testSuites.map((name) => ({
       name,
