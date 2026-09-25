@@ -12,6 +12,7 @@ import type { BridgeLogger } from './log.js';
 import { redactValue } from './redact.js';
 import { parseConstraints } from './goal-constraints.js';
 import { BRIDGE_NAME, BRIDGE_VERSION } from './version.js';
+import { registerOperatorTools } from './operator-mcp.js';
 
 const actionClassSchema = z.enum([
   'filesystem.read',
@@ -525,6 +526,8 @@ export function createMcpServer(bridge: Bridge, cfg: ResolvedBridgeConfig, log: 
     },
     safe(async (args: { session_id: string }) => bridge.stopGoal(args.session_id)),
   );
+
+  registerOperatorTools(server, bridge);
 
   return server;
 }
