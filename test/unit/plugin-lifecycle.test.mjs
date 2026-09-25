@@ -15,16 +15,19 @@ const EXPECTED_TOOLS = [
   'dsh_create_goal',
   'dsh_create_session',
   'dsh_credential_status',
+  'dsh_delegate_goal',
   'dsh_get_result',
   'dsh_get_session',
   'dsh_get_task_status',
   'dsh_health',
   'dsh_list_sessions',
   'dsh_list_workspaces',
+  'dsh_operator_capabilities',
   'dsh_pause_goal',
   'dsh_rerun_step',
   'dsh_resume_goal',
   'dsh_retry_step',
+  'dsh_review_handoff',
   'dsh_revise_goal',
   'dsh_send_message',
   'dsh_start_goal',
@@ -121,7 +124,7 @@ test('shipped plugin entry exports name, apply, and Config', async () => {
   assert.ok(Config);
 });
 
-test('createMcpServer registers all public dsh_* tools (v0.5.0)', () => {
+test('createMcpServer registers upstream plus ChatGPT Work operator dsh_* tools', () => {
   const server = createMcpServer(
     {},
     { resultMaxChars: 100, resultMaxItems: 10, sessionMaxItems: 5, sessionMaxChars: 100 },
@@ -129,7 +132,7 @@ test('createMcpServer registers all public dsh_* tools (v0.5.0)', () => {
   );
   const names = Object.keys(server._registeredTools).sort();
   assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
-  assert.equal(names.length, 23);
+  assert.equal(names.length, 26);
 });
 
 test('package clean script is ESM-safe under type:module', () => {
