@@ -123,6 +123,7 @@ import {
 } from './web-gateway.js';
 import { BRIDGE_NAME, BRIDGE_VERSION } from './version.js';
 import { pathsEqual } from './paths.js';
+import { shouldInvalidatePendingApproval } from './operator-contract.js';
 
 export { normalizePath } from './paths.js';
 
@@ -1399,7 +1400,7 @@ export class Bridge {
     // A substantive Goal/action revision invalidates any approval parked for
     // the previous operation. The user must approve the newly requested exact
     // action instead of an obsolete grant being reused.
-    if (action === 'revise' || action === 'defer' || action === 'resume') {
+    if (shouldInvalidatePendingApproval(action)) {
       await this.failClosedApprovals(sessionId, 'goal_revision_changed');
     }
     const intent = action === 'resume' ? 'resume' : action === 'defer' ? 'defer' : 'revise';
