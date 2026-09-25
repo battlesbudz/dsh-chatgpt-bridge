@@ -1396,6 +1396,12 @@ export class Bridge {
     }, action === 'resume' ? 'goal_resumed' : 'goal_revised');
     pruneBlockers(record, successfulKinds(observed.facts));
     this.goalStore.put(record);
+    // A substantive Goal/action revision invalidates any approval parked for
+    // the previous operation. The user must approve the newly requested exact
+    // action instead of an obsolete grant being reused.
+    if (action === 'revise' || action === 'defer' || action === 'resume') {
+      await this.failClosedApprovals(sessionId, 'goal_revision_changed');
+    }
     const intent = action === 'resume' ? 'resume' : action === 'defer' ? 'defer' : 'revise';
     await this.sendMessage(sessionId, this.controlMessage(
       record,
@@ -1471,6 +1477,27 @@ export class Bridge {
       status: 'cancelled',
       ...(warning === undefined ? {} : { cleanup_warning: warning }),
     };
+  }
+
+  private async failClosedApprovals(sessionId: string, reason: string): Promise<void> {
+    for (const pending of [...this.approvals.values()]) {
+      if (pending.sessionId !== sessionId) continue;
+      this.approvals.delete(pending.id);
+      let settled = false;
+      if (pending.muxRpcId !== undefined && this.apiProxy !== undefined) {
+        try {
+          const receipt = await respondApproval(this.apiProxy, pending.muxRpcId, sessionId, pending.id, 'rejected');
+          settled = receipt.accepted;
+        } catch {
+          settled = false;
+        }
+      }
+      if (!settled) pending.resolve('cancelled');
+      else pending.resolve('rejected');
+      this.noteGoalEvent(sessionId, 'approval_resolved', {
+        metadata: { approval_id: pending.id, decision: 'reject', invalidated: true, reason },
+      });
+    }
   }
 
   private async failClosedWaiting(sessionId: string): Promise<void> {
