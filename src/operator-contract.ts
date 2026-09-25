@@ -31,3 +31,10 @@ export function englishOperatorInstruction(): string {
     'If source material is not English, explain its meaning in English rather than emitting untranslated operator-facing prose.',
   ].join(' ');
 }
+
+
+export type GoalMutationAction = 'revise' | 'defer' | 'resume' | 'start';
+
+export function shouldInvalidatePendingApproval(action: GoalMutationAction): boolean {
+  return action === 'revise' || action === 'defer' || action === 'resume';
+}
