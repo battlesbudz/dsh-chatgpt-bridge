@@ -4,6 +4,7 @@
  * explicit budgets. Unit-testable with fixture events.
  */
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session';
+import { foldGoalFacts } from './goal-facts.js';
 
 /** One turn's span in the log. */
 export interface TurnSpan {
@@ -159,9 +160,9 @@ export function lastEventTime(events: readonly SessionEvent[]): string | undefin
 
 /** The last todo/write snapshot, if any. */
 export function lastTodos(events: readonly SessionEvent[]): { content: string; status: string }[] | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (event.type === 'todo/write') return event.data.todos.map((todo) => ({ content: todo.content, status: todo.status }));
-  }
-  return undefined;
+  // todo/write is an optional tool event carried by some DSH compositions,
+  // not part of dsh-session's closed core event union. Fold through the bridge's
+  // runtime event reader, which validates the extension payload structurally.
+  const facts = foldGoalFacts(events.map(({ type, seq, time, data }) => ({ type, seq, time, data })));
+  return facts.todos;
 }

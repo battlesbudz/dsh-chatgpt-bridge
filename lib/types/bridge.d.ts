@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval';
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions';
 import type { Workspace } from '@deepseek-ai/dsh-workspace';
@@ -38,18 +39,7 @@ export interface PendingApproval {
 /** Who blocked or decided an approval, for deadlock diagnostics. */
 export type ApprovalLayer = 'user' | 'bridge_policy' | 'dsh_policy' | 'platform';
 export interface ApprovalRequestLike {
-    agent: {
-        id: string;
-        session?: {
-            events?: readonly {
-                type: string;
-                data?: unknown;
-            }[];
-            header?: {
-                cwd?: string;
-            };
-        };
-    };
+    agent: Agent;
     toolName: string;
     callId?: string;
     reason?: string;
