@@ -20,6 +20,7 @@ function makeBridge({ registry, agents, sessions, persistence, on, userQuestions
     sessions: sessions ?? { list: () => [], get: () => undefined },
     sessionPersistence: persistence ?? { list: async () => [] },
     agentDefaultModel: { currentSelection: () => ({ provider: 'p', model: 'm' }) },
+    userQuestions,
   };
   const ctx = {
     get: (key) => services[key],
@@ -29,6 +30,7 @@ function makeBridge({ registry, agents, sessions, persistence, on, userQuestions
     agentDefaultModel: services.agentDefaultModel,
     sessionTitle: title,
     on: on ?? (() => {}),
+    effect: () => () => {},
   };
   const log = { debug() {}, info() {}, warn() {}, error() {} };
   return new Bridge(ctx, { sessionMaxItems: 5, sessionMaxChars: 200, resultMaxItems: 10, resultMaxChars: 500 }, log);
@@ -177,6 +179,31 @@ test('answerQuestion: resolves with the offered option', async () => {
   assert.deepEqual(resolved.answers, [{ id: 'inner-1', selected: ['A'] }]);
 });
 
+test('headless questions use the DSH user-questions waterfall and answer only managed sessions', async () => {
+  const listeners = new Map();
+  const bridge = makeBridge({ userQuestions: {}, on: (name, listener) => { listeners.set(name, listener); return () => {}; } });
+  bridge.start();
+  bridge['managed'].add('session-qa');
+  const request = {
+    agent: { id: 'session-qa' },
+    questions: [{ id: 'choice', question: 'Pick one', options: [{ label: 'yes' }] }],
+  };
+  const waterfall = listeners.get('user-questions/request');
+  assert.equal(typeof waterfall, 'function');
+  const answerPromise = waterfall(request, async () => { throw new Error('managed question should be answered by the bridge'); });
+  const [questionId] = bridge['questions'].keys();
+  await bridge.answerQuestion(questionId, 'session-qa', { selected: ['yes'] });
+  assert.deepEqual(await answerPromise, { answers: [{ id: 'choice', selected: ['yes'] }] });
+
+  let delegated = false;
+  const result = await waterfall({ agent: { id: 'other-session' }, questions: [] }, async () => {
+    delegated = true;
+    return { answers: [] };
+  });
+  assert.equal(delegated, true);
+  assert.deepEqual(result, { answers: [] });
+});
+
 test('cancelTask: only live sessions can be cancelled', async () => {
   const bridge = makeBridge({ agents: { get: () => undefined } });
   await assert.rejects(() => bridge.cancelTask('session-1'), (error) => {
@@ -203,7 +230,14 @@ test('sendMessage: unknown session rejected', async () => {
 
 function makeLiveAgent(id, workspacePath, extras = {}) {
   const events = extras.events ?? [];
-  const inbox = extras.inbox ?? { nextTurn: [], nextStep: [], hasPending: false };
+  const inbox = extras.inbox ?? { nextTurn: [], nextStep: [] };
+  Object.defineProperty(inbox, 'hasPending', {
+    get() { return inbox.nextTurn.length + inbox.nextStep.length > 0; },
+    set(value) {
+      if (!value) { inbox.nextTurn = []; inbox.nextStep = []; }
+      else if (!inbox.hasPending) inbox.nextTurn.push({ id: 'legacy-test-pending' });
+    },
+  });
   const agent = {
     id,
     status: extras.status ?? 'idle',
@@ -212,6 +246,7 @@ function makeLiveAgent(id, workspacePath, extras = {}) {
       id,
       header: { id, createdAt: Date.now(), cwd: workspacePath },
       events,
+      snapshotEvents: () => events,
       requestHeader: () => undefined,
     },
     followup(message) {
@@ -239,9 +274,10 @@ function makeStatefulBridge() {
   const agentsApi = {
     get: (id) => agents.get(id),
     list: () => [...agents.values()],
-    create: async ({ sessionId, meta }) => {
+    create: async ({ sessionId, meta, setup }) => {
       created.push(sessionId);
       const agent = makeLiveAgent(sessionId, meta.cwd);
+      await setup?.({ on: () => () => {} }, agent);
       agents.set(sessionId, agent);
       return { agent };
     },

@@ -9,7 +9,9 @@ import {
   START_TIME_TOLERANCE_MS,
 } from '../../lib/control/process-identity.js';
 
-const SPAWN_BLOCKED = process.env.DSH_SHELL === '1';
+// Restricted containers may expose neither /proc/<pid>/exe nor a usable `ps`;
+// the deterministic verifier tests below still cover every decision branch.
+const SPAWN_BLOCKED = process.env.DSH_SHELL === '1' || processExecutablePath(process.pid) === undefined;
 
 test('process-identity: isProcessAlive for own pid', () => {
   assert.equal(isProcessAlive(process.pid), true);

@@ -2,7 +2,7 @@
 /**
  * Test runner for `npm test`.
  *
- * Runs the unit suite with `node --test` in a single process
+ * Runs the unit and integration suites with `node --test` in a single process
  * (`--test-isolation=none`), so the whole suite shares one process and no
  * per-file child processes are spawned.
  *
@@ -15,7 +15,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
-const TEST_ARGS = ['--test', 'test/unit/*.test.mjs'];
+const TEST_ARGS = ['--test', 'test/unit/*.test.mjs', 'test/integration/*.test.mjs'];
 
 function run(flag) {
   return spawnSync(process.execPath, [flag, ...TEST_ARGS], { stdio: 'inherit' });

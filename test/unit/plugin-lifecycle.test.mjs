@@ -150,14 +150,23 @@ test('shared DSH host contracts are peers instead of ordinary dependencies', () 
   }
 });
 
-test('package manifest targets the verified DSH 0.1.1-rc.2 family', () => {
+test('package manifest targets the DSH 0.1.5-rc.3 runtime family', () => {
   const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-  for (const section of ['dependencies', 'devDependencies']) {
-    for (const [packageName, version] of Object.entries(manifest[section] ?? {})) {
-      if (packageName.startsWith('@deepseek-ai/dsh-')) assert.equal(version, '0.1.1-rc.2', `${section}.${packageName}`);
-    }
+  for (const packageName of [
+    '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-presets', '@deepseek-ai/dsh-agent-default-model',
+    '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-title',
+    '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-projection',
+    '@deepseek-ai/dsh-session-projection-cache', '@deepseek-ai/dsh-user-approval',
+    '@deepseek-ai/dsh-user-questions', '@deepseek-ai/dsh-workspace', '@deepseek-ai/dsh-settings',
+  ]) {
+    const version = manifest.dependencies?.[packageName] ?? manifest.peerDependencies?.[packageName] ?? manifest.devDependencies?.[packageName];
+    assert.equal(version, '0.1.5-rc.3', packageName);
   }
-  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-llm'], '^0.1.1-rc.2');
+  assert.equal(manifest.dependencies['@deepseek-ai/cordis-plugin-loader'], '1.0.3');
+  assert.equal(manifest.dependencies['@deepseek-ai/cordis-plugin-include'], '1.0.7');
+  assert.equal(manifest.peerDependencies['@deepseek-ai/cordis'], '4.0.2');
+  assert.equal(manifest.peerDependencies['@deepseek-ai/dsh-llm'], '0.1.5-rc.3');
+  assert.equal(manifest.dependencies['@deepseek-ai/schemastery'], '3.18.2');
 });
 
 test('package.json and package-lock.json carry the same release version', () => {

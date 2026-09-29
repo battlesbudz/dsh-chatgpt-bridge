@@ -14,7 +14,14 @@ const MIX = {
 
 function makeLiveAgent(id, workspacePath, extras = {}) {
   const events = extras.events ?? [];
-  const inbox = extras.inbox ?? { nextTurn: [], nextStep: [], hasPending: false };
+  const inbox = extras.inbox ?? { nextTurn: [], nextStep: [] };
+  Object.defineProperty(inbox, 'hasPending', {
+    get() { return inbox.nextTurn.length + inbox.nextStep.length > 0; },
+    set(value) {
+      if (!value) { inbox.nextTurn = []; inbox.nextStep = []; }
+      else if (!inbox.hasPending) inbox.nextTurn.push({ id: 'legacy-test-pending' });
+    },
+  });
   const agent = {
     id,
     status: extras.status ?? 'idle',
@@ -23,6 +30,7 @@ function makeLiveAgent(id, workspacePath, extras = {}) {
       id,
       header: { id, createdAt: Date.now(), cwd: workspacePath },
       events,
+      snapshotEvents: () => events,
       requestHeader: () => undefined,
     },
     followup(message) {
